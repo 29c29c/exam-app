@@ -394,6 +394,7 @@ const Dashboard = ({
     const [moveState, setMoveState] = useState({ show: false, type: 'folder', item: null });
     const [loadingAction, setLoadingAction] = useState(false);
     const [batchStatus, setBatchStatus] = useState({ show: false, total: 0, current: 0, success: 0, failed: 0, bankName: '' });
+    const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
     const stopBatchRef = useRef(false);
 
     const handleExport = async (bank, format) => {
@@ -413,9 +414,24 @@ const Dashboard = ({
         setBanks(nextBanks);
     };
 
+    const loadAiConfig = async () => {
+        try {
+            const config = await api.ai.getConfig();
+            setAiConfig({
+                provider: config.provider || 'gemini',
+                key: '',
+                hasKey: Boolean(config.hasKey),
+            });
+        } catch (error) {}
+    };
+
     useEffect(() => {
         loadData().catch((error) => alert(error.message));
     }, [currentFolderId]);
+
+    useEffect(() => {
+        loadAiConfig();
+    }, []);
 
     const handleCreate = async () => {
         if (!newName.trim()) return;
@@ -492,6 +508,11 @@ const Dashboard = ({
 
     const handleBatchAnalyze = async (bank) => {
         try {
+            if (!aiConfig.hasKey) {
+                alert('请先进入做题页，在 AI 设置中为当前账号配置 API Key。');
+                return;
+            }
+
             const targets = await api.banks.bookmarks(bank.id, { hasAnalysis: 'false' });
             if (!targets.length) {
                 alert('该题库收藏夹中没有待解析的题目。');
@@ -516,7 +537,6 @@ const Dashboard = ({
                             questionId: target.id,
                             question: target.content,
                             answer: target.answer,
-                            provider: aiConfig.provider,
                         });
                         success += 1;
                         done = true;

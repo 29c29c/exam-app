@@ -13,7 +13,7 @@ const analyzeWithDeepseek = async ({ apiKey, prompt }) => {
     const response = await axios.post(
         'https://api.deepseek.com/chat/completions',
         {
-            model: 'deepseek-chat',
+            model: 'deepseek-v4-flash',
             messages: [{ role: 'user', content: prompt }],
         },
         { headers: { Authorization: `Bearer ${apiKey}` } },

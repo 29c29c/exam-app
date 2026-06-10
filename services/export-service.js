@@ -11,17 +11,22 @@ const formatQuestionForExport = (question, index) => ({
     difficulty: question.difficulty || '',
 });
 
-const exportBankAsJson = ({ bank, questions }) => JSON.stringify({
+const getExportBankName = ({ bank, scope }) => (
+    scope === 'bookmarks' ? `${bank.name} · 收藏夹` : bank.name
+);
+
+const exportBankAsJson = ({ bank, questions, scope }) => JSON.stringify({
     bank: {
         id: bank.id,
         name: bank.name,
         updated_at: bank.updated_at || null,
     },
+    scope: scope === 'bookmarks' ? 'bookmarks' : 'all',
     questions: questions.map(formatQuestionForExport),
 }, null, 2);
 
-const exportBankAsMarkdown = ({ bank, questions }) => {
-    const lines = [`# ${bank.name}`, ''];
+const exportBankAsMarkdown = ({ bank, questions, scope }) => {
+    const lines = [`# ${getExportBankName({ bank, scope })}`, ''];
     questions.forEach((question, index) => {
         const item = formatQuestionForExport(question, index);
         lines.push(`## ${item.index}. ${item.stem}`);
@@ -62,10 +67,10 @@ const exportBankAsCsv = ({ questions }) => {
     return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
 };
 
-const buildExportPayload = ({ bank, questions, format }) => {
-    if (format === 'markdown') return exportBankAsMarkdown({ bank, questions });
+const buildExportPayload = ({ bank, questions, format, scope }) => {
+    if (format === 'markdown') return exportBankAsMarkdown({ bank, questions, scope });
     if (format === 'csv') return exportBankAsCsv({ bank, questions });
-    return exportBankAsJson({ bank, questions });
+    return exportBankAsJson({ bank, questions, scope });
 };
 
 const getExportMimeType = (format) => {

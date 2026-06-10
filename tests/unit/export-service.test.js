@@ -37,3 +37,12 @@ test('buildExportPayload returns csv export', () => {
     assert.match(payload, /"index","type","stem"/);
     assert.match(payload, /"A"/);
 });
+
+test('buildExportPayload marks bookmark scoped export', () => {
+    const jsonPayload = buildExportPayload({ ...sample, format: 'json', scope: 'bookmarks' });
+    const parsed = JSON.parse(jsonPayload);
+    assert.equal(parsed.scope, 'bookmarks');
+
+    const markdownPayload = buildExportPayload({ ...sample, format: 'markdown', scope: 'bookmarks' });
+    assert.match(markdownPayload, /# 测试题库 · 收藏夹/);
+});

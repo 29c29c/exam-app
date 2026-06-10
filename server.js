@@ -1073,14 +1073,16 @@ app.get('/api/banks/:id/export', authenticateToken, async (req, res) => {
     try {
         const bankId = Number(req.params.id);
         const format = ['json', 'markdown', 'csv'].includes(req.query.format) ? req.query.format : 'json';
+        const scope = req.query.scope === 'bookmarks' ? 'bookmarks' : 'all';
         const bank = await dbGet('SELECT id, name, updated_at FROM banks WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [bankId, req.user.id]);
         if (!bank) return sendError(res, '题库不存在', 404, 'BANK_NOT_FOUND');
 
-        const questions = await getQuestionsForBank(req.user.id, bankId, false, {});
-        const payload = buildExportPayload({ bank, questions, format });
+        const questions = await getQuestionsForBank(req.user.id, bankId, scope === 'bookmarks', {});
+        const payload = buildExportPayload({ bank, questions, format, scope });
         const extension = format === 'markdown' ? 'md' : format;
+        const filename = `${bank.name}${scope === 'bookmarks' ? '-收藏夹' : ''}.${extension}`;
         res.setHeader('Content-Type', getExportMimeType(format));
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(bank.name)}.${extension}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
         res.send(payload);
     } catch (error) {
         return sendError(res, error.message || '导出题库失败', error.status || 500, 'BANK_EXPORT_FAILED');

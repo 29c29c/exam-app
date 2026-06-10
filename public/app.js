@@ -397,9 +397,11 @@ const Dashboard = ({
     const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
     const stopBatchRef = useRef(false);
 
-    const handleExport = async (bank, format) => {
+    const handleExport = async (bank, format, scope = '') => {
         try {
-            await api.banks.downloadExport(bank.id, format, `${bank.name}.${format === 'markdown' ? 'md' : format}`);
+            const extension = format === 'markdown' ? 'md' : format;
+            const suffix = scope === 'bookmarks' ? '-收藏夹' : '';
+            await api.banks.downloadExport(bank.id, format, `${bank.name}${suffix}.${extension}`, scope);
         } catch (error) {
             alert(error.message);
         }
@@ -669,6 +671,11 @@ const Dashboard = ({
                                 <button onClick={() => handleExport(bank, 'json')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 JSON</button>
                                 <button onClick={() => handleExport(bank, 'markdown')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 MD</button>
                                 <button onClick={() => handleExport(bank, 'csv')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 CSV</button>
+                            </div>
+                            <div className="grid grid-cols-3 gap-3">
+                                <button onClick={() => handleExport(bank, 'json', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 JSON</button>
+                                <button onClick={() => handleExport(bank, 'markdown', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 MD</button>
+                                <button onClick={() => handleExport(bank, 'csv', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 CSV</button>
                             </div>
                         </div>
                     ))}

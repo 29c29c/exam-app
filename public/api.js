@@ -110,4 +110,13 @@ window.api = {
         restore: (type, id) => apiRequest(`/recycle-bin/${type}/${id}/restore`, 'POST'),
         remove: (type, id) => apiRequest(`/recycle-bin/${type}/${id}`, 'DELETE'),
     },
+    admin: {
+        users: () => apiRequest('/admin/users'),
+        banks: (userId) => apiRequest(`/admin/banks${toQueryString({ userId })}`),
+        removeBank: (id) => apiRequest(`/admin/banks/${id}`, 'DELETE'),
+        inviteCodes: () => apiRequest('/admin/invite-codes'),
+        createInviteCode: (payload) => apiRequest('/admin/invite-codes', 'POST', payload),
+        updateInviteCode: (code, payload) => apiRequest(`/admin/invite-codes/${encodeURIComponent(code)}`, 'PATCH', payload),
+        removeInviteCode: (code) => apiRequest(`/admin/invite-codes/${encodeURIComponent(code)}`, 'DELETE'),
+    },
 };

@@ -36,6 +36,7 @@ const REGISTER_RATE_LIMIT_WINDOW_MS = Number(process.env.REGISTER_RATE_LIMIT_WIN
 const REGISTER_RATE_LIMIT_MAX = Number(process.env.REGISTER_RATE_LIMIT_MAX || 5);
 const AI_CONFIG_SECRET = String(process.env.AI_CONFIG_SECRET || process.env.JWT_SECRET || SECRET_KEY);
 const AI_ENCRYPTION_KEY = crypto.createHash('sha256').update(AI_CONFIG_SECRET).digest();
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || '').trim();
 const corsOrigins = String(process.env.CORS_ORIGIN || '')
     .split(',')
     .map((origin) => origin.trim())
@@ -199,6 +200,21 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
+const isAdminUsername = (username) => Boolean(ADMIN_USERNAME && username === ADMIN_USERNAME);
+
+const requireAdmin = async (req, res, next) => {
+    try {
+        const user = await dbGet('SELECT id, username FROM users WHERE id = ?', [req.user.id]);
+        if (!user || !isAdminUsername(user.username)) {
+            return sendError(res, '需要管理员权限', 403, 'ADMIN_REQUIRED');
+        }
+        req.adminUser = user;
+        return next();
+    } catch (error) {
+        return sendError(res, error.message || '管理员鉴权失败', 500, 'ADMIN_AUTH_FAILED');
+    }
+};
+
 const ensureColumn = async (tableName, columnName, definition) => {
     const columns = await dbAll(`PRAGMA table_info(${tableName})`);
     const exists = columns.some((column) => column.name === columnName);
@@ -217,6 +233,39 @@ const cleanupExpiredPreviews = () => {
 };
 
 const generatePreviewId = () => crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+
+const generateInviteCode = () => crypto.randomBytes(4).toString('hex').toUpperCase();
+
+const normalizeInviteCode = (code) => String(code || '').trim().toUpperCase();
+
+const validateInviteCode = (code) => /^[A-Z0-9_-]{4,64}$/.test(code);
+
+const normalizeExpiresAt = (value) => {
+    const rawValue = String(value || '').trim();
+    if (!rawValue) return null;
+    const parsed = new Date(rawValue);
+    if (Number.isNaN(parsed.getTime())) {
+        const error = new Error('有效期格式无效');
+        error.status = 400;
+        throw error;
+    }
+    return parsed.toISOString().slice(0, 19).replace('T', ' ');
+};
+
+const mapInviteCode = (row) => {
+    const isExpired = row.expires_at && new Date(row.expires_at.replace(' ', 'T') + 'Z').getTime() <= Date.now();
+    return {
+        code: row.code,
+        isUsed: Boolean(row.is_used),
+        isExpired: Boolean(isExpired),
+        expiresAt: row.expires_at || '',
+        createdAt: row.created_at || '',
+        usedAt: row.used_at || '',
+        usedBy: row.used_by || null,
+        usedByUsername: row.used_by_username || '',
+        createdByUsername: row.created_by_username || '',
+    };
+};
 
 const parseLegacyOptions = (rawOptions) => {
     if (!rawOptions) return [];
@@ -675,10 +724,16 @@ const initDatabase = async () => {
     `);
 
     await ensureColumn('banks', 'question_count', 'INTEGER DEFAULT 0');
+    await ensureColumn('users', 'created_at', 'TEXT');
     await ensureColumn('users', 'ai_provider', 'TEXT');
     await ensureColumn('users', 'ai_api_key_encrypted', 'TEXT');
     await ensureColumn('users', 'ai_api_key_iv', 'TEXT');
     await ensureColumn('users', 'ai_api_key_tag', 'TEXT');
+    await ensureColumn('invite_codes', 'created_at', 'TEXT');
+    await ensureColumn('invite_codes', 'expires_at', 'TEXT');
+    await ensureColumn('invite_codes', 'created_by', 'INTEGER');
+    await ensureColumn('invite_codes', 'used_by', 'INTEGER');
+    await ensureColumn('invite_codes', 'used_at', 'TEXT');
     await ensureColumn('banks', 'created_at', 'TEXT');
     await ensureColumn('banks', 'updated_at', 'TEXT');
     await ensureColumn('banks', 'deleted_at', 'TEXT');
@@ -700,6 +755,8 @@ const initDatabase = async () => {
         CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);
     `);
 
+    await dbRun(`UPDATE users SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)`);
+    await dbRun(`UPDATE invite_codes SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)`);
     await dbRun(`UPDATE banks SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP), updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)`);
     await dbRun(`UPDATE questions SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP), updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)`);
     await dbRun(`UPDATE questions SET stem = COALESCE(NULLIF(stem, ''), content) WHERE content IS NOT NULL`);
@@ -739,15 +796,35 @@ app.post('/api/register', applyRateLimit({
     code: 'REGISTER_RATE_LIMITED',
 }), async (req, res) => {
     try {
-        const { username, password, inviteCode } = req.body;
+        const username = String(req.body.username || '').trim();
+        const password = String(req.body.password || '');
+        const inviteCode = normalizeInviteCode(req.body.inviteCode);
         if (!username || !password || !inviteCode) return sendError(res, '请填写完整信息');
 
-        const code = await dbGet('SELECT * FROM invite_codes WHERE code = ? AND is_used = 0', [inviteCode]);
+        const code = await dbGet(
+            `SELECT *
+             FROM invite_codes
+             WHERE code = ? AND is_used = 0 AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))`,
+            [inviteCode],
+        );
         if (!code) return sendError(res, '无效或已被使用的邀请码');
 
         const hash = bcrypt.hashSync(password, 10);
-        await dbRun('INSERT INTO users (username, password) VALUES (?, ?)', [username.trim(), hash]);
-        await dbRun('UPDATE invite_codes SET is_used = 1 WHERE code = ?', [inviteCode]);
+        await dbExec('BEGIN TRANSACTION');
+        try {
+            const userResult = await dbRun(
+                'INSERT INTO users (username, password, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+                [username, hash],
+            );
+            await dbRun(
+                'UPDATE invite_codes SET is_used = 1, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?',
+                [userResult.lastID, inviteCode],
+            );
+            await dbExec('COMMIT');
+        } catch (error) {
+            await dbExec('ROLLBACK');
+            throw error;
+        }
 
         res.json({ success: true });
     } catch (error) {
@@ -775,7 +852,7 @@ app.post('/api/login', applyRateLimit({
 
         const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, { expiresIn: '30d' });
         setAuthCookie(res, token);
-        res.json({ username: user.username });
+        res.json({ username: user.username, isAdmin: isAdminUsername(user.username) });
     } catch (error) {
         return sendError(res, error.message || '登录失败', 500);
     }
@@ -789,6 +866,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     res.json({
         id: user.id,
         username: user.username,
+        isAdmin: isAdminUsername(user.username),
         aiProvider: user.ai_provider || 'gemini',
         aiConfigured: Boolean(user.ai_api_key_encrypted),
     });
@@ -1556,6 +1634,220 @@ app.post('/api/ai-analyze', authenticateToken, async (req, res) => {
     } catch (error) {
         logger.error('AI analyze failed', { message: error.message });
         return sendError(res, 'AI请求失败: ' + (error.response?.data?.error?.message || error.message));
+    }
+});
+
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const users = await dbAll(
+            `SELECT u.id,
+                    u.username,
+                    u.created_at,
+                    (SELECT COUNT(*) FROM banks b WHERE b.user_id = u.id) AS bank_count,
+                    (SELECT COUNT(*) FROM banks b WHERE b.user_id = u.id AND b.deleted_at IS NULL) AS active_bank_count,
+                    (SELECT COUNT(*)
+                     FROM questions q
+                     JOIN banks b ON b.id = q.bank_id
+                     WHERE b.user_id = u.id) AS question_count,
+                    (SELECT COUNT(*)
+                     FROM questions q
+                     JOIN banks b ON b.id = q.bank_id
+                     WHERE b.user_id = u.id AND b.deleted_at IS NULL AND q.deleted_at IS NULL) AS active_question_count
+             FROM users u
+             ORDER BY u.id DESC`,
+        );
+        res.json(users.map((user) => ({
+            id: user.id,
+            username: user.username,
+            createdAt: user.created_at || '',
+            isAdmin: isAdminUsername(user.username),
+            bankCount: user.bank_count || 0,
+            activeBankCount: user.active_bank_count || 0,
+            questionCount: user.question_count || 0,
+            activeQuestionCount: user.active_question_count || 0,
+        })));
+    } catch (error) {
+        return sendError(res, error.message || '获取用户列表失败', 500, 'ADMIN_USERS_FAILED');
+    }
+});
+
+app.get('/api/admin/banks', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const userId = req.query.userId ? Number(req.query.userId) : null;
+        if (req.query.userId && !Number.isFinite(userId)) {
+            return sendError(res, '用户 ID 无效');
+        }
+
+        const rows = await dbAll(
+            `SELECT b.id,
+                    b.name,
+                    b.user_id,
+                    u.username,
+                    b.folder_id,
+                    b.created_at,
+                    b.updated_at,
+                    b.deleted_at,
+                    (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id) AS question_count,
+                    (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL) AS active_question_count,
+                    (SELECT COUNT(*) FROM bookmarks bm JOIN questions q ON q.id = bm.question_id WHERE q.bank_id = b.id) AS bookmark_count
+             FROM banks b
+             JOIN users u ON u.id = b.user_id
+             WHERE (? IS NULL OR b.user_id = ?)
+             ORDER BY u.id DESC, b.id DESC`,
+            [userId, userId],
+        );
+
+        res.json(rows.map((bank) => ({
+            id: bank.id,
+            name: bank.name,
+            userId: bank.user_id,
+            username: bank.username,
+            folderId: bank.folder_id,
+            createdAt: bank.created_at || '',
+            updatedAt: bank.updated_at || '',
+            deletedAt: bank.deleted_at || '',
+            isDeleted: Boolean(bank.deleted_at),
+            questionCount: bank.question_count || 0,
+            activeQuestionCount: bank.active_question_count || 0,
+            bookmarkCount: bank.bookmark_count || 0,
+        })));
+    } catch (error) {
+        return sendError(res, error.message || '获取题库列表失败', 500, 'ADMIN_BANKS_FAILED');
+    }
+});
+
+app.delete('/api/admin/banks/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        const bank = await dbGet(
+            `SELECT b.id,
+                    b.name,
+                    b.user_id,
+                    u.username,
+                    (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id) AS question_count
+             FROM banks b
+             JOIN users u ON u.id = b.user_id
+             WHERE b.id = ?`,
+            [bankId],
+        );
+        if (!bank) return sendError(res, '题库不存在', 404, 'ADMIN_BANK_NOT_FOUND');
+
+        await permanentDeleteBank(bank.id, bank.user_id);
+        logger.warn('Admin permanently deleted bank', {
+            adminId: req.adminUser.id,
+            adminUsername: req.adminUser.username,
+            bankId: bank.id,
+            ownerId: bank.user_id,
+            ownerUsername: bank.username,
+            questionCount: bank.question_count || 0,
+        });
+
+        res.json({
+            success: true,
+            bankId: bank.id,
+            bankName: bank.name,
+            ownerUsername: bank.username,
+            deletedQuestionCount: bank.question_count || 0,
+        });
+    } catch (error) {
+        return sendError(res, error.message || '管理员删除题库失败', error.status || 500, 'ADMIN_BANK_DELETE_FAILED');
+    }
+});
+
+app.get('/api/admin/invite-codes', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const rows = await dbAll(
+            `SELECT ic.*,
+                    created_by_user.username AS created_by_username,
+                    used_by_user.username AS used_by_username
+             FROM invite_codes ic
+             LEFT JOIN users created_by_user ON created_by_user.id = ic.created_by
+             LEFT JOIN users used_by_user ON used_by_user.id = ic.used_by
+             ORDER BY ic.created_at DESC, ic.code`,
+        );
+        res.json(rows.map(mapInviteCode));
+    } catch (error) {
+        return sendError(res, error.message || '获取邀请码失败', 500, 'ADMIN_INVITES_FAILED');
+    }
+});
+
+app.post('/api/admin/invite-codes', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const expiresAt = normalizeExpiresAt(req.body.expiresAt);
+        let code = normalizeInviteCode(req.body.code);
+
+        if (code && !validateInviteCode(code)) {
+            return sendError(res, '邀请码只能包含字母、数字、下划线或短横线，长度 4-64 位');
+        }
+
+        if (!code) {
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                const candidate = generateInviteCode();
+                const existing = await dbGet('SELECT code FROM invite_codes WHERE code = ?', [candidate]);
+                if (!existing) {
+                    code = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (!code) return sendError(res, '生成邀请码失败，请重试', 500, 'ADMIN_INVITE_GENERATE_FAILED');
+
+        await dbRun(
+            `INSERT INTO invite_codes (code, is_used, created_at, expires_at, created_by)
+             VALUES (?, 0, CURRENT_TIMESTAMP, ?, ?)`,
+            [code, expiresAt, req.adminUser.id],
+        );
+
+        const row = await dbGet(
+            `SELECT ic.*, u.username AS created_by_username
+             FROM invite_codes ic
+             LEFT JOIN users u ON u.id = ic.created_by
+             WHERE ic.code = ?`,
+            [code],
+        );
+        res.json(mapInviteCode(row));
+    } catch (error) {
+        if (String(error.message).includes('UNIQUE')) {
+            return sendError(res, '邀请码已存在');
+        }
+        return sendError(res, error.message || '创建邀请码失败', error.status || 500, 'ADMIN_INVITE_CREATE_FAILED');
+    }
+});
+
+app.patch('/api/admin/invite-codes/:code', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const code = normalizeInviteCode(req.params.code);
+        const exists = await dbGet('SELECT code FROM invite_codes WHERE code = ?', [code]);
+        if (!exists) return sendError(res, '邀请码不存在', 404, 'ADMIN_INVITE_NOT_FOUND');
+
+        const expiresAt = req.body.clearExpiresAt === true ? null : normalizeExpiresAt(req.body.expiresAt);
+        await dbRun('UPDATE invite_codes SET expires_at = ? WHERE code = ?', [expiresAt, code]);
+
+        const row = await dbGet(
+            `SELECT ic.*,
+                    created_by_user.username AS created_by_username,
+                    used_by_user.username AS used_by_username
+             FROM invite_codes ic
+             LEFT JOIN users created_by_user ON created_by_user.id = ic.created_by
+             LEFT JOIN users used_by_user ON used_by_user.id = ic.used_by
+             WHERE ic.code = ?`,
+            [code],
+        );
+        res.json(mapInviteCode(row));
+    } catch (error) {
+        return sendError(res, error.message || '更新邀请码失败', error.status || 500, 'ADMIN_INVITE_UPDATE_FAILED');
+    }
+});
+
+app.delete('/api/admin/invite-codes/:code', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const code = normalizeInviteCode(req.params.code);
+        const result = await dbRun('DELETE FROM invite_codes WHERE code = ?', [code]);
+        if (!result.changes) return sendError(res, '邀请码不存在', 404, 'ADMIN_INVITE_NOT_FOUND');
+        res.json({ success: true, code });
+    } catch (error) {
+        return sendError(res, error.message || '删除邀请码失败', error.status || 500, 'ADMIN_INVITE_DELETE_FAILED');
     }
 });
 

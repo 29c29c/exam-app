@@ -9,6 +9,14 @@ const formatDateTime = (value) => {
     return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
+const sqlDateTimeToInputValue = (value) => {
+    if (!value) return '';
+    const date = new Date(`${value.replace(' ', 'T')}Z`);
+    if (Number.isNaN(date.getTime())) return value.slice(0, 16).replace(' ', 'T');
+    const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return localDate.toISOString().slice(0, 16);
+};
+
 const buildFolderPath = (folderId, flatFolders) => {
     if (!folderId) return [];
     const byId = new Map(flatFolders.map((folder) => [folder.id, folder]));
@@ -54,7 +62,7 @@ const Auth = ({ onLogin }) => {
         try {
             if (isLogin) {
                 const result = await api.auth.login(form);
-                onLogin({ name: result.username });
+                onLogin({ name: result.username, isAdmin: Boolean(result.isAdmin) });
             } else {
                 await api.auth.register(form);
                 alert('注册成功，请登录');
@@ -1102,6 +1110,231 @@ const Quiz = ({ bank, isBookmarkMode }) => {
     );
 };
 
+const AdminPanelModal = ({ show, onClose }) => {
+    const [users, setUsers] = useState([]);
+    const [banks, setBanks] = useState([]);
+    const [inviteCodes, setInviteCodes] = useState([]);
+    const [selectedUserId, setSelectedUserId] = useState('');
+    const [inviteForm, setInviteForm] = useState({ code: '', expiresAt: '' });
+    const [inviteDrafts, setInviteDrafts] = useState({});
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+
+    const syncInviteDrafts = (items) => {
+        const drafts = {};
+        items.forEach((item) => {
+            drafts[item.code] = sqlDateTimeToInputValue(item.expiresAt);
+        });
+        setInviteDrafts(drafts);
+    };
+
+    const loadUsers = async () => {
+        const data = await api.admin.users();
+        setUsers(data);
+    };
+
+    const loadBanks = async (userId = selectedUserId) => {
+        const data = await api.admin.banks(userId || '');
+        setBanks(data);
+    };
+
+    const loadInvites = async () => {
+        const data = await api.admin.inviteCodes();
+        setInviteCodes(data);
+        syncInviteDrafts(data);
+    };
+
+    const loadAll = async () => {
+        setLoading(true);
+        try {
+            await Promise.all([loadUsers(), loadBanks(), loadInvites()]);
+        } catch (error) {
+            alert(error.message);
+        }
+        setLoading(false);
+    };
+
+    useEffect(() => {
+        if (show) loadAll();
+    }, [show]);
+
+    const handleUserChange = async (event) => {
+        const nextUserId = event.target.value;
+        setSelectedUserId(nextUserId);
+        setLoading(true);
+        try {
+            await loadBanks(nextUserId);
+        } catch (error) {
+            alert(error.message);
+        }
+        setLoading(false);
+    };
+
+    const handleDeleteBank = async (bank) => {
+        const message = `永久删除题库“${bank.name}”？\n所属用户：${bank.username}\n将直接从服务器删除 ${bank.questionCount || 0} 道题及相关记录，不能从回收站恢复。`;
+        if (!confirm(message)) return;
+        setSaving(true);
+        try {
+            await api.admin.removeBank(bank.id);
+            await Promise.all([loadUsers(), loadBanks()]);
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleCreateInvite = async () => {
+        setSaving(true);
+        try {
+            const created = await api.admin.createInviteCode({
+                code: inviteForm.code.trim(),
+                expiresAt: inviteForm.expiresAt,
+            });
+            setInviteForm({ code: '', expiresAt: '' });
+            await loadInvites();
+            writeClipboard(created.code);
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleUpdateInvite = async (code) => {
+        setSaving(true);
+        try {
+            await api.admin.updateInviteCode(code, {
+                expiresAt: inviteDrafts[code] || '',
+                clearExpiresAt: !inviteDrafts[code],
+            });
+            await loadInvites();
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleDeleteInvite = async (code) => {
+        if (!confirm(`删除邀请码“${code}”？已注册用户不会受到影响。`)) return;
+        setSaving(true);
+        try {
+            await api.admin.removeInviteCode(code);
+            await loadInvites();
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    if (!show) return null;
+
+    const selectedUser = users.find((user) => String(user.id) === String(selectedUserId));
+    const visibleUserCount = selectedUser ? 1 : users.length;
+    const totalActiveBanks = users.reduce((sum, user) => sum + (user.activeBankCount || 0), 0);
+    const totalActiveQuestions = users.reduce((sum, user) => sum + (user.activeQuestionCount || 0), 0);
+
+    return (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white w-full max-w-5xl rounded-3xl shadow-2xl max-h-[92vh] overflow-hidden flex flex-col">
+                <div className="p-5 border-b border-gray-100 flex items-center justify-between gap-4">
+                    <div>
+                        <h3 className="font-bold text-xl">管理员后台</h3>
+                        <div className="text-xs text-gray-400 mt-1">当前 {visibleUserCount} 个用户视图，活跃题库 {selectedUser ? selectedUser.activeBankCount : totalActiveBanks} 个，活跃题目 {selectedUser ? selectedUser.activeQuestionCount : totalActiveQuestions} 道</div>
+                    </div>
+                    <button onClick={onClose} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500"><i className="fas fa-times"></i></button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5 space-y-6 bg-background/70">
+                    <div className="bg-white rounded-2xl shadow-ios p-4 space-y-4">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                            <div>
+                                <div className="font-bold">账户题库</div>
+                                <div className="text-xs text-gray-400 mt-1">永久删除会清理题目、选项、收藏、进度和导入批次。</div>
+                            </div>
+                            <select value={selectedUserId} onChange={handleUserChange} className="p-3 bg-gray-50 rounded-xl outline-none text-sm">
+                                <option value="">全部用户</option>
+                                {users.map((user) => (
+                                    <option key={user.id} value={user.id}>{user.username}{user.isAdmin ? '（管理员）' : ''}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {(selectedUser ? [selectedUser] : users).map((user) => (
+                                <div key={user.id} className="bg-gray-50 rounded-2xl p-4">
+                                    <div className="font-bold truncate">{user.username}</div>
+                                    <div className="text-xs text-gray-400 mt-2">题库 {user.activeBankCount}/{user.bankCount}</div>
+                                    <div className="text-xs text-gray-400">题目 {user.activeQuestionCount}/{user.questionCount}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="space-y-3">
+                            {loading ? (
+                                <div className="text-center text-gray-400 py-8">加载中...</div>
+                            ) : banks.length ? banks.map((bank) => (
+                                <div key={bank.id} className="border border-gray-100 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <div className="font-bold truncate">{bank.name}</div>
+                                            {bank.isDeleted && <span className="px-2 py-1 rounded-full bg-red-50 text-red-500 text-xs">回收站</span>}
+                                        </div>
+                                        <div className="text-xs text-gray-400 mt-1">用户：{bank.username} · 题目 {bank.activeQuestionCount}/{bank.questionCount} · 收藏 {bank.bookmarkCount}</div>
+                                        <div className="text-xs text-gray-400 mt-1">更新于 {formatDateTime(bank.updatedAt)}</div>
+                                    </div>
+                                    <button disabled={saving} onClick={() => handleDeleteBank(bank)} className="px-4 py-3 rounded-xl bg-red-50 text-red-500 font-bold text-sm disabled:opacity-50">
+                                        永久删除
+                                    </button>
+                                </div>
+                            )) : (
+                                <div className="text-center text-gray-400 py-8">暂无题库。</div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl shadow-ios p-4 space-y-4">
+                        <div>
+                            <div className="font-bold">邀请码</div>
+                            <div className="text-xs text-gray-400 mt-1">空的邀请码会自动生成，空的有效期表示长期有效。</div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3">
+                            <input className="p-3 bg-gray-50 rounded-xl outline-none" placeholder="自定义邀请码（可空）" value={inviteForm.code} onChange={(e)=>setInviteForm({ ...inviteForm, code: e.target.value })} />
+                            <input className="p-3 bg-gray-50 rounded-xl outline-none" type="datetime-local" value={inviteForm.expiresAt} onChange={(e)=>setInviteForm({ ...inviteForm, expiresAt: e.target.value })} />
+                            <button disabled={saving} onClick={handleCreateInvite} className="px-5 py-3 rounded-xl bg-primary text-white font-bold disabled:opacity-50">生成</button>
+                        </div>
+
+                        <div className="space-y-3">
+                            {inviteCodes.length ? inviteCodes.map((invite) => (
+                                <div key={invite.code} className="border border-gray-100 rounded-2xl p-4 space-y-3">
+                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                        <div>
+                                            <div className="font-mono font-bold text-lg">{invite.code}</div>
+                                            <div className="text-xs text-gray-400 mt-1">
+                                                {invite.isUsed ? `已使用：${invite.usedByUsername || '未知用户'}` : invite.isExpired ? '已过期' : '可使用'}
+                                                {invite.expiresAt ? ` · 有效期至 ${formatDateTime(invite.expiresAt)}` : ' · 长期有效'}
+                                            </div>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => writeClipboard(invite.code)} className="px-3 py-2 rounded-xl bg-gray-100 text-gray-600 text-sm font-bold">复制</button>
+                                            <button disabled={saving} onClick={() => handleDeleteInvite(invite.code)} className="px-3 py-2 rounded-xl bg-red-50 text-red-500 text-sm font-bold disabled:opacity-50">删除</button>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-2">
+                                        <input className="p-3 bg-gray-50 rounded-xl outline-none text-sm" type="datetime-local" value={inviteDrafts[invite.code] || ''} onChange={(e)=>setInviteDrafts({ ...inviteDrafts, [invite.code]: e.target.value })} />
+                                        <button disabled={saving} onClick={() => handleUpdateInvite(invite.code)} className="px-4 py-3 rounded-xl bg-indigo-50 text-indigo-600 font-bold text-sm disabled:opacity-50">保存有效期</button>
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="text-center text-gray-400 py-8">暂无邀请码。</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const App = () => {
     const [user, setUser] = useState(null);
     const [view, setView] = useState('dashboard');
@@ -1112,6 +1345,7 @@ const App = () => {
     const [folderFlat, setFolderFlat] = useState([]);
     const [showTree, setShowTree] = useState(false);
     const [showRecycleBin, setShowRecycleBin] = useState(false);
+    const [showAdminPanel, setShowAdminPanel] = useState(false);
 
     const loadFolderTree = async () => {
         try {
@@ -1125,7 +1359,7 @@ const App = () => {
 
     useEffect(() => {
         api.auth.me()
-            .then((session) => setUser({ name: session.username }))
+            .then((session) => setUser({ name: session.username, isAdmin: Boolean(session.isAdmin) }))
             .catch(() => setUser(null));
     }, []);
 
@@ -1165,6 +1399,7 @@ const App = () => {
                     <div className="flex items-center gap-2">
                         {view === 'dashboard' && <button onClick={() => setShowRecycleBin(true)} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center"><i className="fas fa-trash-can"></i></button>}
                         {view === 'dashboard' && <button onClick={() => setShowTree(true)} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center"><i className="fas fa-sitemap"></i></button>}
+                        {user.isAdmin && <button onClick={() => setShowAdminPanel(true)} className="w-9 h-9 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center"><i className="fas fa-shield-halved"></i></button>}
                         <button onClick={async () => {
                             if (!confirm('退出登录？')) return;
                             try {
@@ -1206,6 +1441,11 @@ const App = () => {
                 show={showRecycleBin}
                 onClose={() => setShowRecycleBin(false)}
                 onChanged={async () => { await loadFolderTree(); }}
+            />
+
+            <AdminPanelModal
+                show={showAdminPanel}
+                onClose={() => setShowAdminPanel(false)}
             />
         </div>
     );

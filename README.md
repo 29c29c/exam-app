@@ -107,6 +107,7 @@ nvm use 20.19.6
 | `PORT` | `8888` | 服务监听端口 |
 | `JWT_SECRET` | 无 | 登录签名密钥，生产环境必须修改 |
 | `DB_PATH` | `./db/database.sqlite` | SQLite 数据库文件路径 |
+| `ADMIN_USERNAME` | 空 | 管理员账号用户名；留空则不启用管理员后台 |
 | `AI_TIMEOUT_MS` | `30000` | AI 请求超时时间 |
 | `AI_CONFIG_SECRET` | 无 | AI 配置加密 / 签名相关密钥 |
 | `CORS_ORIGIN` | 空 | 允许跨域的域名，多个用逗号分隔 |
@@ -124,6 +125,7 @@ cp .env.example .env
 PORT=8888
 JWT_SECRET=change_me_for_local_dev
 DB_PATH=./db/database.sqlite
+ADMIN_USERNAME=your_admin_username
 AI_TIMEOUT_MS=30000
 AI_CONFIG_SECRET=change_me_too
 CORS_ORIGIN=

@@ -37,6 +37,7 @@ const REGISTER_RATE_LIMIT_MAX = Number(process.env.REGISTER_RATE_LIMIT_MAX || 5)
 const AI_CONFIG_SECRET = String(process.env.AI_CONFIG_SECRET || process.env.JWT_SECRET || SECRET_KEY);
 const AI_ENCRYPTION_KEY = crypto.createHash('sha256').update(AI_CONFIG_SECRET).digest();
 const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || '').trim();
+const DEFAULT_BOOKMARK_COLLECTION_NAME = '默认收藏夹';
 const corsOrigins = String(process.env.CORS_ORIGIN || '')
     .split(',')
     .map((origin) => origin.trim())
@@ -344,12 +345,114 @@ const mapQuestionRow = (row, optionMap) => {
     };
 };
 
+const normalizeBookmarkCollectionName = (name) => String(name || '').trim();
+
+const getOwnedBank = async (userId, bankId) => {
+    const bank = await dbGet('SELECT id, name, updated_at FROM banks WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [bankId, userId]);
+    if (!bank) {
+        const error = new Error('题库不存在');
+        error.status = 404;
+        throw error;
+    }
+    return bank;
+};
+
+const ensureDefaultBookmarkCollection = async (userId, bankId) => {
+    await getOwnedBank(userId, bankId);
+
+    const existing = await dbGet(
+        'SELECT * FROM bookmark_collections WHERE user_id = ? AND bank_id = ? AND is_default = 1 ORDER BY id LIMIT 1',
+        [userId, bankId],
+    );
+    if (existing) return existing;
+
+    const result = await dbRun(
+        `INSERT INTO bookmark_collections (user_id, bank_id, name, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [userId, bankId, DEFAULT_BOOKMARK_COLLECTION_NAME],
+    );
+    return dbGet('SELECT * FROM bookmark_collections WHERE id = ?', [result.lastID]);
+};
+
+const getActiveBookmarkCollection = async (userId, bankId) => {
+    const defaultCollection = await ensureDefaultBookmarkCollection(userId, bankId);
+    const active = await dbGet(
+        `SELECT bc.*
+         FROM bank_bookmark_settings bbs
+         JOIN bookmark_collections bc ON bc.id = bbs.active_collection_id
+         WHERE bbs.user_id = ? AND bbs.bank_id = ? AND bc.user_id = ? AND bc.bank_id = ?`,
+        [userId, bankId, userId, bankId],
+    );
+
+    if (active) return active;
+
+    await dbRun(
+        `INSERT INTO bank_bookmark_settings (user_id, bank_id, active_collection_id)
+         VALUES (?, ?, ?)
+         ON CONFLICT(user_id, bank_id) DO UPDATE SET active_collection_id = excluded.active_collection_id`,
+        [userId, bankId, defaultCollection.id],
+    );
+    return defaultCollection;
+};
+
+const getBookmarkCollectionForUser = async (userId, collectionId) => {
+    const collection = await dbGet(
+        `SELECT bc.*, b.name AS bank_name, b.updated_at AS bank_updated_at
+         FROM bookmark_collections bc
+         JOIN banks b ON b.id = bc.bank_id
+         WHERE bc.id = ? AND bc.user_id = ? AND b.user_id = ? AND b.deleted_at IS NULL`,
+        [collectionId, userId, userId],
+    );
+    if (!collection) {
+        const error = new Error('收藏夹不存在');
+        error.status = 404;
+        throw error;
+    }
+    return collection;
+};
+
+const resolveBookmarkCollection = async (userId, bankId, collectionId = null) => {
+    if (!collectionId) return getActiveBookmarkCollection(userId, bankId);
+    const collection = await getBookmarkCollectionForUser(userId, Number(collectionId));
+    if (Number(collection.bank_id) !== Number(bankId)) {
+        const error = new Error('收藏夹不属于当前题库');
+        error.status = 400;
+        throw error;
+    }
+    return collection;
+};
+
+const listBookmarkCollections = async (userId, bankId) => {
+    const active = await getActiveBookmarkCollection(userId, bankId);
+    const rows = await dbAll(
+        `SELECT bc.id, bc.name, bc.is_default, bc.created_at, bc.updated_at,
+                COALESCE(COUNT(q.id), 0) AS question_count
+         FROM bookmark_collections bc
+         LEFT JOIN collection_bookmarks cb ON cb.collection_id = bc.id
+         LEFT JOIN questions q ON q.id = cb.question_id AND q.deleted_at IS NULL
+         WHERE bc.user_id = ? AND bc.bank_id = ?
+         GROUP BY bc.id
+         ORDER BY bc.is_default DESC, bc.id`,
+        [userId, bankId],
+    );
+
+    return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        is_default: row.is_default ? 1 : 0,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        question_count: row.question_count || 0,
+        is_active: Number(row.id) === Number(active.id) ? 1 : 0,
+    }));
+};
+
 const buildQuestionFilterQuery = ({ bookmarkedOnly = false, filters = {} }) => {
     const where = ['q.bank_id = ?'];
     const params = [];
 
     if (bookmarkedOnly || filters.bookmarked) {
-        where.push('bm.user_id IS NOT NULL');
+        where.push('cb.collection_id IS NOT NULL');
     }
 
     if (filters.keyword) {
@@ -376,27 +479,23 @@ const buildQuestionFilterQuery = ({ bookmarkedOnly = false, filters = {} }) => {
     return { where, params };
 };
 
-const getQuestionsForBank = async (userId, bankId, bookmarkedOnly = false, filters = {}) => {
-    const bank = await dbGet('SELECT id FROM banks WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [bankId, userId]);
-    if (!bank) {
-        const error = new Error('题库不存在');
-        error.status = 404;
-        throw error;
-    }
+const getQuestionsForBank = async (userId, bankId, bookmarkedOnly = false, filters = {}, collectionId = null) => {
+    await getOwnedBank(userId, bankId);
+    const collection = await resolveBookmarkCollection(userId, bankId, collectionId);
 
     const { where, params } = buildQuestionFilterQuery({ bookmarkedOnly, filters });
     const sql = `SELECT q.*,
-                        CASE WHEN bm.user_id IS NOT NULL THEN 1 ELSE 0 END AS is_bookmarked,
+                        CASE WHEN cb.collection_id IS NOT NULL THEN 1 ELSE 0 END AS is_bookmarked,
                         COALESCE(qp.mastery_status, 'unseen') AS mastery_status,
                         qp.last_viewed_at,
                         COALESCE(qp.view_count, 0) AS view_count
                  FROM questions q
-                 LEFT JOIN bookmarks bm ON q.id = bm.question_id AND bm.user_id = ?
+                 LEFT JOIN collection_bookmarks cb ON q.id = cb.question_id AND cb.collection_id = ?
                  LEFT JOIN question_progress qp ON q.id = qp.question_id AND qp.user_id = ?
                  WHERE q.deleted_at IS NULL AND ${where.join(' AND ')}
                  ORDER BY q.id`;
 
-    const rows = await dbAll(sql, [userId, userId, bankId, ...params]);
+    const rows = await dbAll(sql, [collection.id, userId, bankId, ...params]);
     const legacyOptionsById = new Map(rows.map((row) => [row.id, parseLegacyOptions(row.options)]));
     const optionMap = await getQuestionOptions(rows.map((row) => row.id), legacyOptionsById);
 
@@ -436,6 +535,7 @@ const softDeleteQuestion = async (questionId) => {
 
 const permanentDeleteQuestion = async (questionId) => {
     await dbRun('DELETE FROM bookmarks WHERE question_id = ?', [questionId]);
+    await dbRun('DELETE FROM collection_bookmarks WHERE question_id = ?', [questionId]);
     await dbRun('DELETE FROM question_options WHERE question_id = ?', [questionId]);
     await dbRun('DELETE FROM question_progress WHERE question_id = ?', [questionId]);
     await dbRun('DELETE FROM questions WHERE id = ?', [questionId]);
@@ -476,6 +576,8 @@ const permanentDeleteBank = async (bankId, userId) => {
         for (const question of questionIds) {
             await permanentDeleteQuestion(question.id);
         }
+        await dbRun('DELETE FROM bank_bookmark_settings WHERE bank_id = ? AND user_id = ?', [bankId, userId]);
+        await dbRun('DELETE FROM bookmark_collections WHERE bank_id = ? AND user_id = ?', [bankId, userId]);
         await dbRun('DELETE FROM import_batches WHERE bank_id = ?', [bankId]);
         await dbRun('DELETE FROM banks WHERE id = ? AND user_id = ?', [bankId, userId]);
         await dbExec('COMMIT');
@@ -540,22 +642,18 @@ const getFolderImpactStats = async (userId, folderId) => {
 };
 
 const getBankStats = async (bankId, userId) => {
-    const bank = await dbGet('SELECT id, name, updated_at FROM banks WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [bankId, userId]);
-    if (!bank) {
-        const error = new Error('题库不存在');
-        error.status = 404;
-        throw error;
-    }
+    const bank = await getOwnedBank(userId, bankId);
+    const activeCollection = await getActiveBookmarkCollection(userId, bankId);
 
     const row = await dbGet(
         `SELECT
             COUNT(*) AS question_count,
             SUM(CASE WHEN COALESCE(q.analysis, '') != '' THEN 1 ELSE 0 END) AS analysis_count,
-            SUM(CASE WHEN bm.user_id IS NOT NULL THEN 1 ELSE 0 END) AS bookmark_count
+            SUM(CASE WHEN cb.collection_id IS NOT NULL THEN 1 ELSE 0 END) AS bookmark_count
          FROM questions q
-         LEFT JOIN bookmarks bm ON bm.question_id = q.id AND bm.user_id = ?
+         LEFT JOIN collection_bookmarks cb ON cb.question_id = q.id AND cb.collection_id = ?
          WHERE q.bank_id = ? AND q.deleted_at IS NULL`,
-        [userId, bankId],
+        [activeCollection.id, bankId],
     );
 
     return {
@@ -563,6 +661,8 @@ const getBankStats = async (bankId, userId) => {
         question_count: row.question_count || 0,
         analysis_count: row.analysis_count || 0,
         bookmark_count: row.bookmark_count || 0,
+        active_collection_id: activeCollection.id,
+        active_collection_name: activeCollection.name,
     };
 };
 
@@ -678,6 +778,36 @@ const initDatabase = async () => {
             PRIMARY KEY (user_id, question_id)
         );
 
+        CREATE TABLE IF NOT EXISTS bookmark_collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            bank_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_default INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (bank_id) REFERENCES banks(id) ON DELETE CASCADE,
+            UNIQUE (user_id, bank_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS collection_bookmarks (
+            collection_id INTEGER NOT NULL,
+            question_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (collection_id, question_id),
+            FOREIGN KEY (collection_id) REFERENCES bookmark_collections(id) ON DELETE CASCADE,
+            FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS bank_bookmark_settings (
+            user_id INTEGER NOT NULL,
+            bank_id INTEGER NOT NULL,
+            active_collection_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, bank_id),
+            FOREIGN KEY (bank_id) REFERENCES banks(id) ON DELETE CASCADE,
+            FOREIGN KEY (active_collection_id) REFERENCES bookmark_collections(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS question_options (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             question_id INTEGER NOT NULL,
@@ -721,6 +851,8 @@ const initDatabase = async () => {
         CREATE INDEX IF NOT EXISTS idx_question_options_question ON question_options(question_id);
         CREATE INDEX IF NOT EXISTS idx_import_batches_user ON import_batches(user_id);
         CREATE INDEX IF NOT EXISTS idx_question_progress_user ON question_progress(user_id);
+        CREATE INDEX IF NOT EXISTS idx_bookmark_collections_bank ON bookmark_collections(user_id, bank_id);
+        CREATE INDEX IF NOT EXISTS idx_collection_bookmarks_question ON collection_bookmarks(question_id);
     `);
 
     await ensureColumn('banks', 'question_count', 'INTEGER DEFAULT 0');
@@ -753,6 +885,7 @@ const initDatabase = async () => {
     await dbExec(`
         CREATE INDEX IF NOT EXISTS idx_questions_hash ON questions(normalized_hash);
         CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);
+        CREATE INDEX IF NOT EXISTS idx_bank_bookmark_settings_active ON bank_bookmark_settings(active_collection_id);
     `);
 
     await dbRun(`UPDATE users SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)`);
@@ -779,6 +912,50 @@ const initDatabase = async () => {
     for (const bank of banks) {
         await refreshBankQuestionCount(bank.id);
     }
+
+    await dbExec(`
+        INSERT OR IGNORE INTO bookmark_collections (user_id, bank_id, name, is_default, created_at, updated_at)
+        SELECT user_id, id, '${DEFAULT_BOOKMARK_COLLECTION_NAME}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM banks
+        WHERE user_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM bookmark_collections bc
+              WHERE bc.user_id = banks.user_id
+                AND bc.bank_id = banks.id
+                AND bc.is_default = 1
+          );
+
+        INSERT OR IGNORE INTO collection_bookmarks (collection_id, question_id, created_at)
+        SELECT bc.id, bm.question_id, CURRENT_TIMESTAMP
+        FROM bookmarks bm
+        JOIN questions q ON q.id = bm.question_id
+        JOIN banks b ON b.id = q.bank_id AND b.user_id = bm.user_id
+        JOIN bookmark_collections bc ON bc.user_id = bm.user_id AND bc.bank_id = b.id AND bc.is_default = 1;
+
+        INSERT OR IGNORE INTO bank_bookmark_settings (user_id, bank_id, active_collection_id)
+        SELECT bc.user_id, bc.bank_id, bc.id
+        FROM bookmark_collections bc
+        WHERE bc.is_default = 1;
+
+        UPDATE bank_bookmark_settings
+        SET active_collection_id = (
+            SELECT bc.id
+            FROM bookmark_collections bc
+            WHERE bc.user_id = bank_bookmark_settings.user_id
+              AND bc.bank_id = bank_bookmark_settings.bank_id
+              AND bc.is_default = 1
+            ORDER BY bc.id
+            LIMIT 1
+        )
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM bookmark_collections bc
+            WHERE bc.id = bank_bookmark_settings.active_collection_id
+              AND bc.user_id = bank_bookmark_settings.user_id
+              AND bc.bank_id = bank_bookmark_settings.bank_id
+        );
+    `);
 
     const inviteStats = await dbGet('SELECT COUNT(*) AS count FROM invite_codes');
     if (inviteStats.count === 0) {
@@ -1066,21 +1243,35 @@ app.get('/api/banks', authenticateToken, async (req, res) => {
         const sql = folderId
             ? `SELECT b.*,
                       COALESCE(b.question_count, (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL)) AS question_count,
-                      COALESCE((SELECT COUNT(*) FROM bookmarks bm JOIN questions q ON q.id = bm.question_id WHERE q.bank_id = b.id AND q.deleted_at IS NULL AND bm.user_id = ?), 0) AS bookmark_count,
                       COALESCE((SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL AND COALESCE(q.analysis, '') != ''), 0) AS analysis_count
                FROM banks b
                WHERE b.user_id = ? AND b.deleted_at IS NULL AND b.folder_id = ?
                ORDER BY b.id`
             : `SELECT b.*,
                       COALESCE(b.question_count, (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL)) AS question_count,
-                      COALESCE((SELECT COUNT(*) FROM bookmarks bm JOIN questions q ON q.id = bm.question_id WHERE q.bank_id = b.id AND q.deleted_at IS NULL AND bm.user_id = ?), 0) AS bookmark_count,
                       COALESCE((SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL AND COALESCE(q.analysis, '') != ''), 0) AS analysis_count
                FROM banks b
                WHERE b.user_id = ? AND b.deleted_at IS NULL AND b.folder_id IS NULL
                ORDER BY b.id`;
-        const params = folderId ? [req.user.id, req.user.id, folderId] : [req.user.id, req.user.id];
+        const params = folderId ? [req.user.id, folderId] : [req.user.id];
         const rows = await dbAll(sql, params);
-        res.json(rows);
+        const enrichedRows = await Promise.all(rows.map(async (bank) => {
+            const activeCollection = await getActiveBookmarkCollection(req.user.id, bank.id);
+            const bookmarkCount = await dbGet(
+                `SELECT COUNT(q.id) AS count
+                 FROM collection_bookmarks cb
+                 JOIN questions q ON q.id = cb.question_id
+                 WHERE cb.collection_id = ? AND q.deleted_at IS NULL`,
+                [activeCollection.id],
+            );
+            return {
+                ...bank,
+                bookmark_count: bookmarkCount.count || 0,
+                active_collection_id: activeCollection.id,
+                active_collection_name: activeCollection.name,
+            };
+        }));
+        res.json(enrichedRows);
     } catch (error) {
         return sendError(res, error.message || '获取题库失败', 500);
     }
@@ -1093,12 +1284,27 @@ app.post('/api/banks', authenticateToken, async (req, res) => {
         if (!name) return sendError(res, '题库名称不能为空');
         await ensureFolderOwnership(req.user.id, folderId);
 
-        const result = await dbRun(
-            `INSERT INTO banks (name, folder_id, user_id, question_count, created_at, updated_at)
-             VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-            [name, folderId, req.user.id],
-        );
-        res.json({ id: result.lastID, name, folderId });
+        await dbExec('BEGIN TRANSACTION');
+        let bankId = null;
+        try {
+            const result = await dbRun(
+                `INSERT INTO banks (name, folder_id, user_id, question_count, created_at, updated_at)
+                 VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                [name, folderId, req.user.id],
+            );
+            bankId = result.lastID;
+            const collection = await ensureDefaultBookmarkCollection(req.user.id, bankId);
+            await dbRun(
+                `INSERT INTO bank_bookmark_settings (user_id, bank_id, active_collection_id)
+                 VALUES (?, ?, ?)`,
+                [req.user.id, bankId, collection.id],
+            );
+            await dbExec('COMMIT');
+        } catch (error) {
+            await dbExec('ROLLBACK');
+            throw error;
+        }
+        res.json({ id: bankId, name, folderId });
     } catch (error) {
         return sendError(res, error.message || '创建题库失败', error.status || 500);
     }
@@ -1152,18 +1358,128 @@ app.get('/api/banks/:id/export', authenticateToken, async (req, res) => {
         const bankId = Number(req.params.id);
         const format = ['json', 'markdown', 'csv'].includes(req.query.format) ? req.query.format : 'json';
         const scope = req.query.scope === 'bookmarks' ? 'bookmarks' : 'all';
-        const bank = await dbGet('SELECT id, name, updated_at FROM banks WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [bankId, req.user.id]);
-        if (!bank) return sendError(res, '题库不存在', 404, 'BANK_NOT_FOUND');
+        const bank = await getOwnedBank(req.user.id, bankId);
+        const collection = scope === 'bookmarks'
+            ? await resolveBookmarkCollection(req.user.id, bankId, req.query.collectionId || null)
+            : null;
 
-        const questions = await getQuestionsForBank(req.user.id, bankId, scope === 'bookmarks', {});
-        const payload = buildExportPayload({ bank, questions, format, scope });
+        const questions = await getQuestionsForBank(req.user.id, bankId, scope === 'bookmarks', {}, collection ? collection.id : null);
+        const payload = buildExportPayload({
+            bank,
+            questions,
+            format,
+            scope,
+            collectionName: collection ? collection.name : '',
+        });
         const extension = format === 'markdown' ? 'md' : format;
-        const filename = `${bank.name}${scope === 'bookmarks' ? '-收藏夹' : ''}.${extension}`;
+        const filename = `${bank.name}${collection ? `-${collection.name}` : ''}${scope === 'bookmarks' && !collection ? '-收藏夹' : ''}.${extension}`;
         res.setHeader('Content-Type', getExportMimeType(format));
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
         res.send(payload);
     } catch (error) {
         return sendError(res, error.message || '导出题库失败', error.status || 500, 'BANK_EXPORT_FAILED');
+    }
+});
+
+app.get('/api/banks/:id/bookmark-collections', authenticateToken, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        await getOwnedBank(req.user.id, bankId);
+        const collections = await listBookmarkCollections(req.user.id, bankId);
+        const active = collections.find((item) => item.is_active) || collections[0] || null;
+        res.json({ collections, activeCollectionId: active ? active.id : null });
+    } catch (error) {
+        return sendError(res, error.message || '获取收藏夹失败', error.status || 500, 'BOOKMARK_COLLECTIONS_FAILED');
+    }
+});
+
+app.post('/api/banks/:id/bookmark-collections', authenticateToken, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        await getOwnedBank(req.user.id, bankId);
+        const name = normalizeBookmarkCollectionName(req.body.name);
+        if (!name) return sendError(res, '收藏夹名称不能为空');
+
+        const result = await dbRun(
+            `INSERT INTO bookmark_collections (user_id, bank_id, name, is_default, created_at, updated_at)
+             VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [req.user.id, bankId, name],
+        );
+        const collection = await dbGet('SELECT * FROM bookmark_collections WHERE id = ?', [result.lastID]);
+        res.json({
+            id: collection.id,
+            name: collection.name,
+            is_default: collection.is_default ? 1 : 0,
+            question_count: 0,
+            is_active: 0,
+            created_at: collection.created_at,
+            updated_at: collection.updated_at,
+        });
+    } catch (error) {
+        const isDuplicate = String(error.message || '').includes('UNIQUE');
+        return sendError(res, isDuplicate ? '同一题库内收藏夹名称不能重复' : (error.message || '创建收藏夹失败'), error.status || 500, 'BOOKMARK_COLLECTION_CREATE_FAILED');
+    }
+});
+
+app.patch('/api/bookmark-collections/:collectionId', authenticateToken, async (req, res) => {
+    try {
+        const collection = await getBookmarkCollectionForUser(req.user.id, Number(req.params.collectionId));
+        const name = normalizeBookmarkCollectionName(req.body.name);
+        if (!name) return sendError(res, '收藏夹名称不能为空');
+
+        await dbRun(
+            'UPDATE bookmark_collections SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
+            [name, collection.id, req.user.id],
+        );
+        res.json({ success: true, id: collection.id, name });
+    } catch (error) {
+        const isDuplicate = String(error.message || '').includes('UNIQUE');
+        return sendError(res, isDuplicate ? '同一题库内收藏夹名称不能重复' : (error.message || '重命名收藏夹失败'), error.status || 500, 'BOOKMARK_COLLECTION_RENAME_FAILED');
+    }
+});
+
+app.delete('/api/bookmark-collections/:collectionId', authenticateToken, async (req, res) => {
+    try {
+        const collection = await getBookmarkCollectionForUser(req.user.id, Number(req.params.collectionId));
+        if (collection.is_default) return sendError(res, '默认收藏夹不能删除');
+
+        const defaultCollection = await ensureDefaultBookmarkCollection(req.user.id, collection.bank_id);
+        await dbExec('BEGIN TRANSACTION');
+        try {
+            await dbRun(
+                `UPDATE bank_bookmark_settings
+                 SET active_collection_id = ?
+                 WHERE user_id = ? AND bank_id = ? AND active_collection_id = ?`,
+                [defaultCollection.id, req.user.id, collection.bank_id, collection.id],
+            );
+            await dbRun('DELETE FROM bookmark_collections WHERE id = ? AND user_id = ?', [collection.id, req.user.id]);
+            await dbExec('COMMIT');
+        } catch (error) {
+            await dbExec('ROLLBACK');
+            throw error;
+        }
+
+        const activeCollection = await getActiveBookmarkCollection(req.user.id, collection.bank_id);
+        res.json({ success: true, activeCollectionId: activeCollection.id });
+    } catch (error) {
+        return sendError(res, error.message || '删除收藏夹失败', error.status || 500, 'BOOKMARK_COLLECTION_DELETE_FAILED');
+    }
+});
+
+app.post('/api/banks/:id/bookmark-collections/active', authenticateToken, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        await getOwnedBank(req.user.id, bankId);
+        const collection = await resolveBookmarkCollection(req.user.id, bankId, req.body.collectionId);
+        await dbRun(
+            `INSERT INTO bank_bookmark_settings (user_id, bank_id, active_collection_id)
+             VALUES (?, ?, ?)
+             ON CONFLICT(user_id, bank_id) DO UPDATE SET active_collection_id = excluded.active_collection_id`,
+            [req.user.id, bankId, collection.id],
+        );
+        res.json({ success: true, activeCollectionId: collection.id, activeCollectionName: collection.name });
+    } catch (error) {
+        return sendError(res, error.message || '确认当前收藏夹失败', error.status || 500, 'BOOKMARK_COLLECTION_ACTIVE_FAILED');
     }
 });
 
@@ -1311,6 +1627,12 @@ app.post('/api/import/commit', authenticateToken, async (req, res) => {
                 [preview.bankName, preview.folderId, req.user.id],
             );
             bankId = bankResult.lastID;
+            const collection = await ensureDefaultBookmarkCollection(req.user.id, bankId);
+            await dbRun(
+                `INSERT INTO bank_bookmark_settings (user_id, bank_id, active_collection_id)
+                 VALUES (?, ?, ?)`,
+                [req.user.id, bankId, collection.id],
+            );
 
             const batchResult = await dbRun(
                 `INSERT INTO import_batches (
@@ -1498,7 +1820,7 @@ app.delete('/api/questions/:id', authenticateToken, async (req, res) => {
 
 app.get('/api/banks/:id/questions', authenticateToken, async (req, res) => {
     try {
-        const rows = await getQuestionsForBank(req.user.id, Number(req.params.id), false, req.query);
+        const rows = await getQuestionsForBank(req.user.id, Number(req.params.id), false, req.query, req.query.collectionId || null);
         res.json(rows);
     } catch (error) {
         return sendError(res, error.message || '获取题目失败', error.status || 500);
@@ -1558,22 +1880,29 @@ app.post('/api/bookmarks/toggle', authenticateToken, async (req, res) => {
     try {
         const questionId = Number(req.body.questionId);
         const question = await dbGet(
-            `SELECT q.id
+            `SELECT q.id, q.bank_id
              FROM questions q
              JOIN banks b ON q.bank_id = b.id
-             WHERE q.id = ? AND b.user_id = ?`,
+             WHERE q.id = ? AND q.deleted_at IS NULL AND b.user_id = ? AND b.deleted_at IS NULL`,
             [questionId, req.user.id],
         );
         if (!question) return sendError(res, '题目不存在', 404);
 
-        const row = await dbGet('SELECT * FROM bookmarks WHERE user_id = ? AND question_id = ?', [req.user.id, questionId]);
+        const collection = await resolveBookmarkCollection(req.user.id, question.bank_id, req.body.collectionId || null);
+        const row = await dbGet(
+            'SELECT * FROM collection_bookmarks WHERE collection_id = ? AND question_id = ?',
+            [collection.id, questionId],
+        );
         if (row) {
-            await dbRun('DELETE FROM bookmarks WHERE user_id = ? AND question_id = ?', [req.user.id, questionId]);
-            return res.json({ is_bookmarked: 0 });
+            await dbRun('DELETE FROM collection_bookmarks WHERE collection_id = ? AND question_id = ?', [collection.id, questionId]);
+            return res.json({ is_bookmarked: 0, collectionId: collection.id });
         }
 
-        await dbRun('INSERT INTO bookmarks (user_id, question_id) VALUES (?, ?)', [req.user.id, questionId]);
-        return res.json({ is_bookmarked: 1 });
+        await dbRun(
+            'INSERT INTO collection_bookmarks (collection_id, question_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            [collection.id, questionId],
+        );
+        return res.json({ is_bookmarked: 1, collectionId: collection.id });
     } catch (error) {
         return sendError(res, error.message || '收藏操作失败', error.status || 500);
     }
@@ -1581,7 +1910,7 @@ app.post('/api/bookmarks/toggle', authenticateToken, async (req, res) => {
 
 app.get('/api/banks/:id/bookmarks', authenticateToken, async (req, res) => {
     try {
-        const rows = await getQuestionsForBank(req.user.id, Number(req.params.id), true, req.query);
+        const rows = await getQuestionsForBank(req.user.id, Number(req.params.id), true, req.query, req.query.collectionId || null);
         res.json(rows);
     } catch (error) {
         return sendError(res, error.message || '获取收藏失败', error.status || 500);
@@ -1689,7 +2018,11 @@ app.get('/api/admin/banks', authenticateToken, requireAdmin, async (req, res) =>
                     b.deleted_at,
                     (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id) AS question_count,
                     (SELECT COUNT(*) FROM questions q WHERE q.bank_id = b.id AND q.deleted_at IS NULL) AS active_question_count,
-                    (SELECT COUNT(*) FROM bookmarks bm JOIN questions q ON q.id = bm.question_id WHERE q.bank_id = b.id) AS bookmark_count
+                    (SELECT COUNT(*)
+                     FROM collection_bookmarks cb
+                     JOIN bookmark_collections bc ON bc.id = cb.collection_id
+                     JOIN questions q ON q.id = cb.question_id
+                     WHERE bc.bank_id = b.id AND q.deleted_at IS NULL) AS bookmark_count
              FROM banks b
              JOIN users u ON u.id = b.user_id
              WHERE (? IS NULL OR b.user_id = ?)

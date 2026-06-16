@@ -11,22 +11,23 @@ const formatQuestionForExport = (question, index) => ({
     difficulty: question.difficulty || '',
 });
 
-const getExportBankName = ({ bank, scope }) => (
-    scope === 'bookmarks' ? `${bank.name} · 收藏夹` : bank.name
+const getExportBankName = ({ bank, scope, collectionName = '' }) => (
+    scope === 'bookmarks' ? `${bank.name} · ${collectionName || '收藏夹'}` : bank.name
 );
 
-const exportBankAsJson = ({ bank, questions, scope }) => JSON.stringify({
+const exportBankAsJson = ({ bank, questions, scope, collectionName = '' }) => JSON.stringify({
     bank: {
         id: bank.id,
         name: bank.name,
         updated_at: bank.updated_at || null,
     },
     scope: scope === 'bookmarks' ? 'bookmarks' : 'all',
+    collection: scope === 'bookmarks' ? (collectionName || '收藏夹') : null,
     questions: questions.map(formatQuestionForExport),
 }, null, 2);
 
-const exportBankAsMarkdown = ({ bank, questions, scope }) => {
-    const lines = [`# ${getExportBankName({ bank, scope })}`, ''];
+const exportBankAsMarkdown = ({ bank, questions, scope, collectionName = '' }) => {
+    const lines = [`# ${getExportBankName({ bank, scope, collectionName })}`, ''];
     questions.forEach((question, index) => {
         const item = formatQuestionForExport(question, index);
         lines.push(`## ${item.index}. ${item.stem}`);
@@ -67,10 +68,10 @@ const exportBankAsCsv = ({ questions }) => {
     return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
 };
 
-const buildExportPayload = ({ bank, questions, format, scope }) => {
-    if (format === 'markdown') return exportBankAsMarkdown({ bank, questions, scope });
-    if (format === 'csv') return exportBankAsCsv({ bank, questions });
-    return exportBankAsJson({ bank, questions, scope });
+const buildExportPayload = ({ bank, questions, format, scope, collectionName = '' }) => {
+    if (format === 'markdown') return exportBankAsMarkdown({ bank, questions, scope, collectionName });
+    if (format === 'csv') return exportBankAsCsv({ questions });
+    return exportBankAsJson({ bank, questions, scope, collectionName });
 };
 
 const getExportMimeType = (format) => {

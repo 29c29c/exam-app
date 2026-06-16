@@ -39,10 +39,11 @@ test('buildExportPayload returns csv export', () => {
 });
 
 test('buildExportPayload marks bookmark scoped export', () => {
-    const jsonPayload = buildExportPayload({ ...sample, format: 'json', scope: 'bookmarks' });
+    const jsonPayload = buildExportPayload({ ...sample, format: 'json', scope: 'bookmarks', collectionName: '错题收藏' });
     const parsed = JSON.parse(jsonPayload);
     assert.equal(parsed.scope, 'bookmarks');
+    assert.equal(parsed.collection, '错题收藏');
 
-    const markdownPayload = buildExportPayload({ ...sample, format: 'markdown', scope: 'bookmarks' });
-    assert.match(markdownPayload, /# 测试题库 · 收藏夹/);
+    const markdownPayload = buildExportPayload({ ...sample, format: 'markdown', scope: 'bookmarks', collectionName: '错题收藏' });
+    assert.match(markdownPayload, /# 测试题库 · 错题收藏/);
 });

@@ -390,6 +390,7 @@ const Dashboard = ({
     treeData,
     onNavigateFolder,
     onOpenBank,
+    onManageBookmarks,
     onStructureChange,
 }) => {
     const [folders, setFolders] = useState([]);
@@ -403,6 +404,8 @@ const Dashboard = ({
     const [loadingAction, setLoadingAction] = useState(false);
     const [batchStatus, setBatchStatus] = useState({ show: false, total: 0, current: 0, success: 0, failed: 0, bankName: '' });
     const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
+    const [bookmarkCollectionsByBank, setBookmarkCollectionsByBank] = useState({});
+    const [selectedCollectionByBank, setSelectedCollectionByBank] = useState({});
     const stopBatchRef = useRef(false);
 
     const handleExport = async (bank, format, scope = '') => {
@@ -422,6 +425,18 @@ const Dashboard = ({
         ]);
         setFolders(nextFolders);
         setBanks(nextBanks);
+        const collectionEntries = await Promise.all(nextBanks.map(async (bank) => {
+            const result = await api.banks.bookmarkCollections(bank.id);
+            return [bank.id, result];
+        }));
+        const nextCollections = {};
+        const nextSelections = {};
+        collectionEntries.forEach(([bankId, result]) => {
+            nextCollections[bankId] = result.collections || [];
+            nextSelections[bankId] = result.activeCollectionId || '';
+        });
+        setBookmarkCollectionsByBank(nextCollections);
+        setSelectedCollectionByBank(nextSelections);
     };
 
     const loadAiConfig = async () => {
@@ -577,6 +592,31 @@ const Dashboard = ({
         }
     };
 
+    const handleConfirmCollection = async (bank) => {
+        const collectionId = selectedCollectionByBank[bank.id] || bank.active_collection_id;
+        if (!collectionId) return alert('请先选择收藏夹');
+        setLoadingAction(true);
+        try {
+            const result = await api.banks.setActiveBookmarkCollection(bank.id, collectionId);
+            setBanks((prev) => prev.map((item) => item.id === bank.id ? {
+                ...item,
+                active_collection_id: result.activeCollectionId,
+                active_collection_name: result.activeCollectionName,
+            } : item));
+            setBookmarkCollectionsByBank((prev) => ({
+                ...prev,
+                [bank.id]: (prev[bank.id] || []).map((item) => ({
+                    ...item,
+                    is_active: Number(item.id) === Number(result.activeCollectionId) ? 1 : 0,
+                })),
+            }));
+            alert(`当前收藏夹已切换为“${result.activeCollectionName}”`);
+        } catch (error) {
+            alert(error.message);
+        }
+        setLoadingAction(false);
+    };
+
     return (
         <div className="space-y-4 pb-20">
             <div className="bg-white rounded-3xl shadow-ios p-5">
@@ -638,10 +678,16 @@ const Dashboard = ({
             {banks.length > 0 && (
                 <div className="space-y-3">
                     <div className="text-xs uppercase tracking-[0.25em] text-gray-400 px-1">Banks</div>
-                    {banks.map((bank) => (
+                    {banks.map((bank) => {
+                        const collections = bookmarkCollectionsByBank[bank.id] || [];
+                        const selectedCollectionId = selectedCollectionByBank[bank.id] || bank.active_collection_id || '';
+                        const activeCollection = collections.find((item) => Number(item.id) === Number(bank.active_collection_id))
+                            || collections.find((item) => Number(item.id) === Number(selectedCollectionId))
+                            || collections[0];
+                        return (
                         <div key={bank.id} className="bg-white p-4 rounded-2xl shadow-ios space-y-4">
                             <div className="flex items-center gap-4">
-                                <button onClick={() => onOpenBank(bank, false)} className="flex-1 flex items-center gap-4 text-left">
+                                <button onClick={() => onOpenBank(bank, false, activeCollection)} className="flex-1 flex items-center gap-4 text-left">
                                     <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center text-primary text-xl"><i className="fas fa-book"></i></div>
                                     <div className="min-w-0">
                                         <div className="font-bold truncate">{bank.name}</div>
@@ -671,8 +717,8 @@ const Dashboard = ({
                             </div>
 
                             <div className="grid grid-cols-3 gap-3">
-                                <button onClick={() => onOpenBank(bank, false)} className="py-3 rounded-xl bg-primary/10 text-primary font-bold text-sm">做题</button>
-                                <button onClick={() => onOpenBank(bank, true)} className="py-3 rounded-xl bg-yellow-50 text-yellow-600 font-bold text-sm">收藏夹</button>
+                                <button onClick={() => onOpenBank(bank, false, activeCollection)} className="py-3 rounded-xl bg-primary/10 text-primary font-bold text-sm">做题</button>
+                                <button onClick={() => onOpenBank(bank, true, activeCollection)} className="py-3 rounded-xl bg-yellow-50 text-yellow-600 font-bold text-sm">收藏夹</button>
                                 <button onClick={() => handleBatchAnalyze(bank)} className="py-3 rounded-xl bg-indigo-50 text-indigo-600 font-bold text-sm">批量 AI</button>
                             </div>
                             <div className="grid grid-cols-3 gap-3">
@@ -680,13 +726,24 @@ const Dashboard = ({
                                 <button onClick={() => handleExport(bank, 'markdown')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 MD</button>
                                 <button onClick={() => handleExport(bank, 'csv')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 CSV</button>
                             </div>
-                            <div className="grid grid-cols-3 gap-3">
-                                <button onClick={() => handleExport(bank, 'json', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 JSON</button>
-                                <button onClick={() => handleExport(bank, 'markdown', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 MD</button>
-                                <button onClick={() => handleExport(bank, 'csv', 'bookmarks')} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">收藏 CSV</button>
+                            <div className="grid grid-cols-3 gap-3 items-stretch">
+                                <label className="rounded-xl bg-yellow-50 text-yellow-800 px-3 py-2 flex flex-col justify-center gap-1 min-w-0">
+                                    <span className="text-[11px] font-bold text-yellow-600">当前收藏夹</span>
+                                    <select
+                                        value={selectedCollectionId}
+                                        onChange={(event) => setSelectedCollectionByBank((prev) => ({ ...prev, [bank.id]: Number(event.target.value) }))}
+                                        className="w-full bg-transparent outline-none text-sm font-bold truncate"
+                                    >
+                                        {collections.map((collection) => (
+                                            <option key={collection.id} value={collection.id}>{collection.name}</option>
+                                        ))}
+                                    </select>
+                                </label>
+                                <button onClick={() => handleConfirmCollection(bank)} disabled={loadingAction || !selectedCollectionId} className="py-3 rounded-xl bg-yellow-100 text-yellow-700 font-bold text-sm disabled:opacity-50">确认当前收藏夹</button>
+                                <button onClick={() => onManageBookmarks(bank)} className="py-3 rounded-xl bg-yellow-50 text-yellow-700 font-bold text-sm">管理收藏夹</button>
                             </div>
                         </div>
-                    ))}
+                    )})}
                 </div>
             )}
 
@@ -763,7 +820,7 @@ const Dashboard = ({
     );
 };
 
-const Quiz = ({ bank, isBookmarkMode }) => {
+const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
     const [questions, setQuestions] = useState([]);
     const [index, setIndex] = useState(0);
     const [showAns, setShowAns] = useState(false);
@@ -804,6 +861,7 @@ const Quiz = ({ bank, isBookmarkMode }) => {
                 type: activeFilters.type,
                 hasAnalysis: activeFilters.hasAnalysis,
                 masteryStatus: activeFilters.masteryStatus,
+                collectionId,
             };
             const response = isBookmarkMode
                 ? await api.banks.bookmarks(bank.id, params)
@@ -821,7 +879,7 @@ const Quiz = ({ bank, isBookmarkMode }) => {
 
     useEffect(() => {
         loadQuestions(filters);
-    }, [bank.id, isBookmarkMode]);
+    }, [bank.id, isBookmarkMode, collectionId]);
 
     useEffect(() => {
         loadAiConfig();
@@ -857,7 +915,7 @@ const Quiz = ({ bank, isBookmarkMode }) => {
 
     const toggleFav = async () => {
         try {
-            await api.questions.toggleBookmark(currentQ.id);
+            await api.questions.toggleBookmark(currentQ.id, collectionId);
             setQuestions((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, is_bookmarked: item.is_bookmarked ? 0 : 1 } : item));
         } catch (error) {
             alert(error.message);
@@ -975,7 +1033,7 @@ const Quiz = ({ bank, isBookmarkMode }) => {
                 </div>
                 <div className="flex justify-between items-center text-xs text-gray-400">
                     <div>当前共 {questions.length} 题</div>
-                    <div>{isBookmarkMode ? '收藏夹模式' : '题库模式'}</div>
+                    <div>{isBookmarkMode ? `收藏夹：${collectionName || '当前收藏夹'}` : `题库模式 · ${collectionName || '当前收藏夹'}`}</div>
                 </div>
             </div>
 
@@ -1106,6 +1164,140 @@ const Quiz = ({ bank, isBookmarkMode }) => {
                     </div>
                 </div>
             )}
+        </div>
+    );
+};
+
+const BookmarkManager = ({ bank }) => {
+    const [collections, setCollections] = useState([]);
+    const [activeCollectionId, setActiveCollectionId] = useState('');
+    const [newName, setNewName] = useState('');
+    const [renameState, setRenameState] = useState({ show: false, item: null, value: '' });
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+
+    const loadCollections = async () => {
+        setLoading(true);
+        try {
+            const result = await api.banks.bookmarkCollections(bank.id);
+            setCollections(result.collections || []);
+            setActiveCollectionId(result.activeCollectionId || '');
+        } catch (error) {
+            alert(error.message);
+        }
+        setLoading(false);
+    };
+
+    useEffect(() => {
+        loadCollections();
+    }, [bank.id]);
+
+    const handleCreate = async () => {
+        const name = newName.trim();
+        if (!name) return alert('请输入收藏夹名称');
+        setSaving(true);
+        try {
+            await api.banks.createBookmarkCollection(bank.id, { name });
+            setNewName('');
+            await loadCollections();
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleRename = async () => {
+        if (!renameState.item) return;
+        const name = renameState.value.trim();
+        if (!name) return alert('请输入收藏夹名称');
+        setSaving(true);
+        try {
+            await api.bookmarkCollections.rename(renameState.item.id, name);
+            setRenameState({ show: false, item: null, value: '' });
+            await loadCollections();
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleDelete = async (collection) => {
+        if (collection.is_default) return alert('默认收藏夹不能删除');
+        if (!confirm(`删除收藏夹“${collection.name}”？\n只会删除收藏索引，不会删除题目。`)) return;
+        setSaving(true);
+        try {
+            const result = await api.bookmarkCollections.remove(collection.id);
+            await loadCollections();
+            if (result.activeCollectionId) setActiveCollectionId(result.activeCollectionId);
+        } catch (error) {
+            alert(error.message);
+        }
+        setSaving(false);
+    };
+
+    const handleExportMarkdown = async (collection) => {
+        try {
+            await api.banks.downloadExport(
+                bank.id,
+                'markdown',
+                `${bank.name}-${collection.name}.md`,
+                'bookmarks',
+                collection.id,
+            );
+        } catch (error) {
+            alert(error.message);
+        }
+    };
+
+    return (
+        <div className="space-y-4 pb-20">
+            <div className="bg-white rounded-3xl shadow-ios p-5">
+                <div className="text-xs uppercase tracking-[0.25em] text-gray-400 mb-2">Bookmark Collections</div>
+                <h2 className="text-2xl font-bold">{bank.name}</h2>
+                <div className="text-sm text-gray-400 mt-2">管理当前题库的收藏夹。</div>
+            </div>
+
+            <div className="bg-white rounded-3xl shadow-ios p-5 space-y-3">
+                <div className="font-bold">添加收藏夹</div>
+                <div className="grid grid-cols-[1fr_auto] gap-3">
+                    <input className="p-3 bg-gray-50 rounded-xl outline-none" placeholder="收藏夹名称" value={newName} onChange={(e)=>setNewName(e.target.value)} />
+                    <button onClick={handleCreate} disabled={saving} className="px-5 py-3 rounded-xl bg-primary text-white font-bold disabled:opacity-50">添加</button>
+                </div>
+            </div>
+
+            <div className="space-y-3">
+                {loading ? (
+                    <div className="p-10 text-center text-gray-400">加载中...</div>
+                ) : collections.length ? collections.map((collection) => (
+                    <div key={collection.id} className="bg-white rounded-2xl shadow-ios p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <div className="font-bold truncate">{collection.name}</div>
+                                {collection.is_default ? <span className="px-2 py-1 rounded-full bg-yellow-50 text-yellow-600 text-xs">默认</span> : null}
+                                {Number(collection.id) === Number(activeCollectionId) ? <span className="px-2 py-1 rounded-full bg-primary/10 text-primary text-xs">当前</span> : null}
+                            </div>
+                            <div className="text-xs text-gray-400 mt-1">{collection.question_count || 0} 道题 · 更新于 {formatDateTime(collection.updated_at)}</div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 md:flex md:justify-end">
+                            <button onClick={() => setRenameState({ show: true, item: collection, value: collection.name })} disabled={saving} className="px-3 py-2 rounded-xl bg-gray-100 text-gray-600 text-sm font-bold disabled:opacity-50">改名</button>
+                            <button onClick={() => handleExportMarkdown(collection)} className="px-3 py-2 rounded-xl bg-yellow-50 text-yellow-700 text-sm font-bold">导出 MD</button>
+                            <button onClick={() => handleDelete(collection)} disabled={saving || collection.is_default} className="px-3 py-2 rounded-xl bg-red-50 text-red-500 text-sm font-bold disabled:opacity-40">删除</button>
+                        </div>
+                    </div>
+                )) : (
+                    <div className="bg-white rounded-3xl shadow-ios p-10 text-center text-gray-400">暂无收藏夹。</div>
+                )}
+            </div>
+
+            <NameModal
+                show={renameState.show}
+                title="重命名收藏夹"
+                value={renameState.value}
+                onChange={(value) => setRenameState((prev) => ({ ...prev, value }))}
+                onClose={() => setRenameState({ show: false, item: null, value: '' })}
+                onSubmit={handleRename}
+                loading={saving}
+            />
         </div>
     );
 };
@@ -1340,6 +1532,7 @@ const App = () => {
     const [view, setView] = useState('dashboard');
     const [currentFolderId, setCurrentFolderId] = useState(null);
     const [currentBank, setCurrentBank] = useState(null);
+    const [currentBookmarkCollection, setCurrentBookmarkCollection] = useState(null);
     const [isBookmarkMode, setIsBookmarkMode] = useState(false);
     const [folderTree, setFolderTree] = useState([]);
     const [folderFlat, setFolderFlat] = useState([]);
@@ -1373,9 +1566,10 @@ const App = () => {
     if (!user) return <Auth onLogin={setUser} />;
 
     const handleBack = () => {
-        if (view === 'quiz') {
+        if (view === 'quiz' || view === 'bookmarkManager') {
             setView('dashboard');
             setIsBookmarkMode(false);
+            setCurrentBookmarkCollection(null);
             return;
         }
 
@@ -1384,16 +1578,21 @@ const App = () => {
         }
     };
 
+    const activeBookmarkCollectionId = currentBookmarkCollection ? currentBookmarkCollection.id : (currentBank ? currentBank.active_collection_id : '');
+    const activeBookmarkCollectionName = currentBookmarkCollection ? currentBookmarkCollection.name : (currentBank ? currentBank.active_collection_name : '');
+
     const title = view === 'quiz'
-        ? (isBookmarkMode ? `${currentBank.name} · 收藏夹` : currentBank.name)
-        : (currentFolder ? currentFolder.name : '我的资源库');
+        ? (isBookmarkMode ? `${currentBank.name} · ${activeBookmarkCollectionName || '收藏夹'}` : currentBank.name)
+        : (view === 'bookmarkManager' && currentBank
+            ? `${currentBank.name} · 管理收藏夹`
+            : (currentFolder ? currentFolder.name : '我的资源库'));
 
     return (
         <div className="flex flex-col h-full bg-background">
             <div className="glass sticky top-0 z-50 pt-safe">
                 <div className="h-14 px-4 flex items-center justify-between">
                     <div className="flex items-center gap-2 overflow-hidden flex-1">
-                        {(currentFolder || view === 'quiz') && <button onClick={handleBack} className="text-primary px-2 -ml-2"><i className="fas fa-chevron-left text-lg"></i></button>}
+                        {(currentFolder || view === 'quiz' || view === 'bookmarkManager') && <button onClick={handleBack} className="text-primary px-2 -ml-2"><i className="fas fa-chevron-left text-lg"></i></button>}
                         <h1 className="font-bold text-lg truncate">{title}</h1>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1419,14 +1618,28 @@ const App = () => {
                         treeData={folderTree}
                         onStructureChange={loadFolderTree}
                         onNavigateFolder={(folderId) => setCurrentFolderId(folderId)}
-                        onOpenBank={(bank, bookmarkMode) => {
+                        onOpenBank={(bank, bookmarkMode, collection) => {
                             setCurrentBank(bank);
+                            setCurrentBookmarkCollection(collection || {
+                                id: bank.active_collection_id,
+                                name: bank.active_collection_name || '当前收藏夹',
+                            });
                             setIsBookmarkMode(bookmarkMode);
                             setView('quiz');
                         }}
+                        onManageBookmarks={(bank) => {
+                            setCurrentBank(bank);
+                            setView('bookmarkManager');
+                        }}
                     />
                 )}
-                {view === 'quiz' && currentBank && <Quiz bank={currentBank} isBookmarkMode={isBookmarkMode} />}
+                {view === 'quiz' && currentBank && <Quiz
+                    bank={currentBank}
+                    isBookmarkMode={isBookmarkMode}
+                    collectionId={activeBookmarkCollectionId}
+                    collectionName={activeBookmarkCollectionName}
+                />}
+                {view === 'bookmarkManager' && currentBank && <BookmarkManager bank={currentBank} />}
             </div>
 
             <FolderTreeSheet

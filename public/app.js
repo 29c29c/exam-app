@@ -51,6 +51,52 @@ const writeClipboard = (text) => {
     }
 };
 
+const SHORTCUT_STORAGE_KEY = 'examApp.quizShortcuts';
+const DEFAULT_SHORTCUTS = {
+    previous: 'a',
+    next: 'd',
+    answer: 's',
+};
+
+const normalizeShortcutKey = (value) => {
+    const chars = Array.from(String(value || '').trim());
+    return chars.length ? chars[0].toLowerCase() : '';
+};
+
+const shortcutsStore = {
+    read: () => {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(SHORTCUT_STORAGE_KEY) || '{}');
+            return {
+                previous: normalizeShortcutKey(parsed.previous) || DEFAULT_SHORTCUTS.previous,
+                next: normalizeShortcutKey(parsed.next) || DEFAULT_SHORTCUTS.next,
+                answer: normalizeShortcutKey(parsed.answer) || DEFAULT_SHORTCUTS.answer,
+            };
+        } catch (error) {
+            return { ...DEFAULT_SHORTCUTS };
+        }
+    },
+    save: (shortcuts) => {
+        const nextShortcuts = {
+            previous: normalizeShortcutKey(shortcuts.previous) || DEFAULT_SHORTCUTS.previous,
+            next: normalizeShortcutKey(shortcuts.next) || DEFAULT_SHORTCUTS.next,
+            answer: normalizeShortcutKey(shortcuts.answer) || DEFAULT_SHORTCUTS.answer,
+        };
+        localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(nextShortcuts));
+        return nextShortcuts;
+    },
+};
+
+const shouldIgnoreKeyboardShortcut = (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return true;
+    if (document.querySelector('[data-settings-modal="true"]')) return true;
+
+    const target = event.target;
+    if (!target) return false;
+    const tagName = target.tagName ? target.tagName.toLowerCase() : '';
+    return target.isContentEditable || ['input', 'textarea', 'select'].includes(tagName);
+};
+
 const Auth = ({ onLogin }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [form, setForm] = useState({ username: '', password: '', inviteCode: '' });
@@ -392,6 +438,7 @@ const Dashboard = ({
     onOpenBank,
     onManageBookmarks,
     onStructureChange,
+    onOpenSettings,
 }) => {
     const [folders, setFolders] = useState([]);
     const [banks, setBanks] = useState([]);
@@ -407,16 +454,6 @@ const Dashboard = ({
     const [bookmarkCollectionsByBank, setBookmarkCollectionsByBank] = useState({});
     const [selectedCollectionByBank, setSelectedCollectionByBank] = useState({});
     const stopBatchRef = useRef(false);
-
-    const handleExport = async (bank, format, scope = '') => {
-        try {
-            const extension = format === 'markdown' ? 'md' : format;
-            const suffix = scope === 'bookmarks' ? '-收藏夹' : '';
-            await api.banks.downloadExport(bank.id, format, `${bank.name}${suffix}.${extension}`, scope);
-        } catch (error) {
-            alert(error.message);
-        }
-    };
 
     const loadData = async () => {
         const [nextFolders, nextBanks] = await Promise.all([
@@ -456,6 +493,20 @@ const Dashboard = ({
 
     useEffect(() => {
         loadAiConfig();
+    }, []);
+
+    useEffect(() => {
+        const handleAiConfigUpdate = (event) => {
+            const detail = event.detail || {};
+            setAiConfig((prev) => ({
+                ...prev,
+                provider: detail.provider || prev.provider,
+                key: '',
+                hasKey: Boolean(detail.hasKey),
+            }));
+        };
+        window.addEventListener('ai-config-updated', handleAiConfigUpdate);
+        return () => window.removeEventListener('ai-config-updated', handleAiConfigUpdate);
     }, []);
 
     const handleCreate = async () => {
@@ -534,7 +585,8 @@ const Dashboard = ({
     const handleBatchAnalyze = async (bank) => {
         try {
             if (!aiConfig.hasKey) {
-                alert('请先进入做题页，在 AI 设置中为当前账号配置 API Key。');
+                alert('请先在个人设置中为当前账号配置 API Key。');
+                onOpenSettings('api');
                 return;
             }
 
@@ -721,11 +773,6 @@ const Dashboard = ({
                                 <button onClick={() => onOpenBank(bank, true, activeCollection)} className="py-3 rounded-xl bg-yellow-50 text-yellow-600 font-bold text-sm">收藏夹</button>
                                 <button onClick={() => handleBatchAnalyze(bank)} className="py-3 rounded-xl bg-indigo-50 text-indigo-600 font-bold text-sm">批量 AI</button>
                             </div>
-                            <div className="grid grid-cols-3 gap-3">
-                                <button onClick={() => handleExport(bank, 'json')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 JSON</button>
-                                <button onClick={() => handleExport(bank, 'markdown')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 MD</button>
-                                <button onClick={() => handleExport(bank, 'csv')} className="py-3 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm">导出 CSV</button>
-                            </div>
                             <div className="grid grid-cols-3 gap-3 items-stretch">
                                 <label className="rounded-xl bg-yellow-50 text-yellow-800 px-3 py-2 flex flex-col justify-center gap-1 min-w-0">
                                     <span className="text-[11px] font-bold text-yellow-600">当前收藏夹</span>
@@ -820,7 +867,7 @@ const Dashboard = ({
     );
 };
 
-const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
+const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettings }) => {
     const [questions, setQuestions] = useState([]);
     const [index, setIndex] = useState(0);
     const [showAns, setShowAns] = useState(false);
@@ -835,10 +882,8 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
         random: false,
     });
     const [queryInput, setQueryInput] = useState('');
-    const [aiConfig, setAiConfig] = useState({
-        show: false,
-        ...aiConfigStore.read(),
-    });
+    const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
+    const [shortcuts, setShortcuts] = useState(() => shortcutsStore.read());
     const lastViewRef = useRef(null);
 
     const loadAiConfig = async () => {
@@ -887,6 +932,20 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
 
     const currentQ = questions[index];
 
+    const goPrevious = () => {
+        if (index === 0) return;
+        setIndex((value) => value - 1);
+        setShowAns(false);
+        lastViewRef.current = null;
+    };
+
+    const goNext = () => {
+        if (index >= questions.length - 1) return;
+        setIndex((value) => value + 1);
+        setShowAns(false);
+        lastViewRef.current = null;
+    };
+
     useEffect(() => {
         if (!showAns || !currentQ || lastViewRef.current === currentQ.id) return;
         lastViewRef.current = currentQ.id;
@@ -894,6 +953,52 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
             setQuestions((prev) => prev.map((item) => item.id === currentQ.id ? { ...item, ...progress } : item));
         }).catch(() => {});
     }, [showAns, currentQ ? currentQ.id : null]);
+
+    useEffect(() => {
+        const handleShortcutsUpdate = (event) => {
+            setShortcuts(event.detail || shortcutsStore.read());
+        };
+        window.addEventListener('quiz-shortcuts-updated', handleShortcutsUpdate);
+        return () => window.removeEventListener('quiz-shortcuts-updated', handleShortcutsUpdate);
+    }, []);
+
+    useEffect(() => {
+        const handleAiConfigUpdate = (event) => {
+            const detail = event.detail || {};
+            setAiConfig((prev) => ({
+                ...prev,
+                provider: detail.provider || prev.provider,
+                key: '',
+                hasKey: Boolean(detail.hasKey),
+            }));
+        };
+        window.addEventListener('ai-config-updated', handleAiConfigUpdate);
+        return () => window.removeEventListener('ai-config-updated', handleAiConfigUpdate);
+    }, []);
+
+    useEffect(() => {
+        if (loading || questions.length === 0 || showSheet) return undefined;
+
+        const handleKeyDown = (event) => {
+            if (shouldIgnoreKeyboardShortcut(event)) return;
+            const key = normalizeShortcutKey(event.key);
+            if (!key) return;
+
+            if (key === shortcuts.previous) {
+                event.preventDefault();
+                goPrevious();
+            } else if (key === shortcuts.next) {
+                event.preventDefault();
+                goNext();
+            } else if (key === shortcuts.answer) {
+                event.preventDefault();
+                setShowAns(true);
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [loading, questions.length, index, showSheet, shortcuts.previous, shortcuts.next, shortcuts.answer]);
 
     const applyFilters = async () => {
         const nextFilters = { ...filters, keyword: queryInput.trim() };
@@ -945,7 +1050,7 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
 
     const fetchAI = async (forceRefresh = false) => {
         if (!aiConfig.hasKey) {
-            setAiConfig((prev) => ({ ...prev, show: true }));
+            onOpenSettings('api');
             return;
         }
 
@@ -962,31 +1067,6 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
             alert(error.message);
         }
         setAiLoading(false);
-    };
-
-    const saveAiSettings = async () => {
-        if (!aiConfig.hasKey && !aiConfig.key.trim()) {
-            alert('请先输入当前账号的 API Key');
-            return;
-        }
-
-        try {
-            const result = await api.ai.saveConfig({
-                provider: aiConfig.provider,
-                key: aiConfig.key,
-            });
-            aiConfigStore.save(aiConfig);
-            setAiConfig((prev) => ({
-                ...prev,
-                show: false,
-                key: '',
-                provider: result.provider,
-                hasKey: Boolean(result.hasKey),
-            }));
-            alert('AI 配置已保存到当前账号');
-        } catch (error) {
-            alert(error.message);
-        }
     };
 
     if (loading) return <div className="p-10 text-center text-gray-400">加载中...</div>;
@@ -1096,13 +1176,13 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
 
             <div className="glass fixed bottom-0 left-0 right-0 pb-safe pt-2 px-4 z-40">
                 <div className="max-w-4xl mx-auto h-16 flex items-center justify-between gap-4">
-                    <button disabled={index === 0} onClick={() => { setIndex((value) => value - 1); setShowAns(false); lastViewRef.current = null; }} className="w-12 h-12 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center disabled:opacity-30"><i className="fas fa-chevron-left"></i></button>
+                    <button disabled={index === 0} onClick={goPrevious} className="w-12 h-12 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center disabled:opacity-30"><i className="fas fa-chevron-left"></i></button>
                     <div className="flex gap-3">
                         <button onClick={() => setShowAns(!showAns)} className={`h-12 px-6 rounded-full font-bold shadow-lg transition active:scale-95 ${showAns ? 'bg-gray-800 text-white' : 'bg-warning text-white'}`}>{showAns ? '隐藏' : '看答案'}</button>
                         <button onClick={toggleFav} className={`w-12 h-12 rounded-full border flex items-center justify-center shadow-lg active:scale-95 ${currentQ.is_bookmarked ? 'bg-yellow-50 border-yellow-400 text-yellow-500' : 'bg-white border-gray-100 text-gray-300'}`}><i className="fas fa-star"></i></button>
                         <button onClick={() => setShowSheet(true)} className="w-12 h-12 rounded-full bg-white border border-gray-100 text-primary flex items-center justify-center shadow-lg active:scale-95"><i className="fas fa-th-large"></i></button>
                     </div>
-                    <button disabled={index === questions.length - 1} onClick={() => { setIndex((value) => value + 1); setShowAns(false); lastViewRef.current = null; }} className="w-12 h-12 rounded-full bg-primary text-white shadow-lg shadow-blue-500/30 flex items-center justify-center disabled:opacity-30"><i className="fas fa-chevron-right"></i></button>
+                    <button disabled={index === questions.length - 1} onClick={goNext} className="w-12 h-12 rounded-full bg-primary text-white shadow-lg shadow-blue-500/30 flex items-center justify-center disabled:opacity-30"><i className="fas fa-chevron-right"></i></button>
                 </div>
             </div>
 
@@ -1135,35 +1215,6 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName }) => {
                 </div>
             )}
 
-            {aiConfig.show && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-                    <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl">
-                        <h3 className="font-bold text-lg mb-2 text-center">配置 AI 助手</h3>
-                        <p className="text-xs text-gray-400 text-center mb-4">{aiConfigStore.message}</p>
-                        <div className="space-y-4">
-                            <div className="flex bg-gray-100 p-1 rounded-xl">
-                                {['gemini', 'deepseek'].map((provider) => (
-                                    <button key={provider} onClick={() => setAiConfig({ ...aiConfig, provider })} className={`flex-1 py-2 rounded-lg text-sm font-bold capitalize ${aiConfig.provider === provider ? 'bg-white shadow text-primary' : 'text-gray-400'}`}>{provider}</button>
-                                ))}
-                            </div>
-                            <input
-                                className="w-full p-3 border rounded-xl outline-none"
-                                type="password"
-                                value={aiConfig.key}
-                                onChange={(e)=>setAiConfig({ ...aiConfig, key: e.target.value })}
-                                placeholder={aiConfig.hasKey ? '留空则保留当前 Key' : '输入当前账号的 API Key'}
-                            />
-                            <div className="text-xs text-gray-400">
-                                {aiConfig.hasKey ? '当前账号已保存密钥，留空保存只会更新 Provider。' : '当前账号尚未配置 AI Key。'}
-                            </div>
-                            <div className="grid grid-cols-2 gap-3">
-                                <button onClick={() => setAiConfig({ ...aiConfig, show: false, key: '' })} className="py-3 rounded-xl bg-gray-100 text-gray-600 font-bold">取消</button>
-                                <button onClick={saveAiSettings} className="w-full bg-primary text-white py-3 rounded-xl font-bold">保存</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 };
@@ -1527,6 +1578,262 @@ const AdminPanelModal = ({ show, onClose }) => {
     );
 };
 
+const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, onClose, onLogout }) => {
+    const [activeTab, setActiveTab] = useState('profile');
+    const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
+    const [shortcutsDraft, setShortcutsDraft] = useState(() => shortcutsStore.read());
+    const [banks, setBanks] = useState([]);
+    const [loadingBanks, setLoadingBanks] = useState(false);
+    const [savingAi, setSavingAi] = useState(false);
+    const [savingShortcuts, setSavingShortcuts] = useState(false);
+    const [exportingKey, setExportingKey] = useState('');
+
+    const loadAiConfig = async () => {
+        try {
+            const config = await api.ai.getConfig();
+            setAiConfig({
+                provider: config.provider || 'gemini',
+                key: '',
+                hasKey: Boolean(config.hasKey),
+            });
+        } catch (error) {
+            alert(error.message);
+        }
+    };
+
+    const loadBanks = async () => {
+        setLoadingBanks(true);
+        try {
+            const data = await api.banks.list(currentFolderId);
+            setBanks(data);
+        } catch (error) {
+            alert(error.message);
+        }
+        setLoadingBanks(false);
+    };
+
+    useEffect(() => {
+        if (!show) return;
+        setActiveTab(initialSection || 'profile');
+        setShortcutsDraft(shortcutsStore.read());
+        loadAiConfig();
+        loadBanks();
+    }, [show, initialSection, currentFolderId]);
+
+    const saveAiSettings = async () => {
+        if (!aiConfig.hasKey && !aiConfig.key.trim()) {
+            alert('请先输入当前账号的 API Key');
+            return;
+        }
+
+        setSavingAi(true);
+        try {
+            const result = await api.ai.saveConfig({
+                provider: aiConfig.provider,
+                key: aiConfig.key,
+            });
+            aiConfigStore.save(aiConfig);
+            const nextConfig = {
+                provider: result.provider,
+                key: '',
+                hasKey: Boolean(result.hasKey),
+            };
+            setAiConfig(nextConfig);
+            window.dispatchEvent(new CustomEvent('ai-config-updated', { detail: nextConfig }));
+            alert('AI 配置已保存到当前账号');
+        } catch (error) {
+            alert(error.message);
+        }
+        setSavingAi(false);
+    };
+
+    const updateShortcut = (name, value) => {
+        setShortcutsDraft((prev) => ({
+            ...prev,
+            [name]: normalizeShortcutKey(value),
+        }));
+    };
+
+    const saveShortcuts = () => {
+        const values = [shortcutsDraft.previous, shortcutsDraft.next, shortcutsDraft.answer].map(normalizeShortcutKey);
+        if (values.some((value) => !value)) {
+            alert('请为每个快捷键填写一个按键');
+            return;
+        }
+        if (new Set(values).size !== values.length) {
+            alert('快捷键不能重复');
+            return;
+        }
+
+        setSavingShortcuts(true);
+        const nextShortcuts = shortcutsStore.save({
+            previous: values[0],
+            next: values[1],
+            answer: values[2],
+        });
+        setShortcutsDraft(nextShortcuts);
+        window.dispatchEvent(new CustomEvent('quiz-shortcuts-updated', { detail: nextShortcuts }));
+        setSavingShortcuts(false);
+        alert('快捷键已保存');
+    };
+
+    const resetShortcuts = () => {
+        const nextShortcuts = shortcutsStore.save(DEFAULT_SHORTCUTS);
+        setShortcutsDraft(nextShortcuts);
+        window.dispatchEvent(new CustomEvent('quiz-shortcuts-updated', { detail: nextShortcuts }));
+    };
+
+    const handleExport = async (bank, format) => {
+        const extension = format === 'markdown' ? 'md' : format;
+        const key = `${bank.id}-${format}`;
+        setExportingKey(key);
+        try {
+            await api.banks.downloadExport(bank.id, format, `${bank.name}.${extension}`);
+        } catch (error) {
+            alert(error.message);
+        }
+        setExportingKey('');
+    };
+
+    if (!show) return null;
+
+    const tabs = [
+        { id: 'profile', label: '个人', icon: 'fa-user' },
+        { id: 'api', label: 'API', icon: 'fa-key' },
+        { id: 'shortcuts', label: '快捷键', icon: 'fa-keyboard' },
+        { id: 'export', label: '导出', icon: 'fa-file-export' },
+    ];
+
+    const renderShortcutInput = (name, label, hint) => (
+        <label className="grid grid-cols-[1fr_5rem] gap-3 items-center rounded-2xl bg-gray-50 p-4">
+            <span>
+                <span className="block font-bold text-sm text-gray-700">{label}</span>
+                <span className="block text-xs text-gray-400 mt-1">{hint}</span>
+            </span>
+            <input
+                className="h-12 rounded-xl border border-gray-200 bg-white text-center text-xl font-bold uppercase outline-none focus:ring-2 focus:ring-primary/30"
+                maxLength={1}
+                value={(shortcutsDraft[name] || '').toUpperCase()}
+                onChange={(event) => updateShortcut(name, event.target.value)}
+            />
+        </label>
+    );
+
+    return (
+        <div data-settings-modal="true" className="fixed inset-0 z-[85] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl max-h-[92vh] overflow-hidden flex flex-col">
+                <div className="p-5 border-b border-gray-100 flex items-center justify-between gap-4">
+                    <div>
+                        <h3 className="font-bold text-xl">个人设置</h3>
+                        <div className="text-xs text-gray-400 mt-1">{user.name}</div>
+                    </div>
+                    <button onClick={onClose} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500"><i className="fas fa-times"></i></button>
+                </div>
+
+                <div className="p-4 border-b border-gray-100 grid grid-cols-4 gap-2">
+                    {tabs.map((tab) => (
+                        <button
+                            key={tab.id}
+                            onClick={() => setActiveTab(tab.id)}
+                            className={`py-3 rounded-2xl text-sm font-bold flex items-center justify-center gap-2 ${activeTab === tab.id ? 'bg-primary text-white' : 'bg-gray-50 text-gray-500'}`}
+                        >
+                            <i className={`fas ${tab.icon}`}></i>
+                            <span>{tab.label}</span>
+                        </button>
+                    ))}
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5 bg-background/70">
+                    {activeTab === 'profile' && (
+                        <div className="bg-white rounded-2xl shadow-ios p-5 space-y-5">
+                            <div>
+                                <div className="text-xs uppercase tracking-[0.25em] text-gray-400 mb-2">Account</div>
+                                <div className="font-bold text-lg">{user.name}</div>
+                                <div className="text-sm text-gray-400 mt-1">{user.isAdmin ? '管理员账号' : '普通账号'}</div>
+                            </div>
+                            <button onClick={onLogout} className="w-full py-3 rounded-xl bg-red-50 text-red-500 font-bold">
+                                <i className="fas fa-right-from-bracket mr-2"></i>退出登录
+                            </button>
+                        </div>
+                    )}
+
+                    {activeTab === 'api' && (
+                        <div className="bg-white rounded-2xl shadow-ios p-5 space-y-4">
+                            <div>
+                                <div className="font-bold">AI API 配置</div>
+                                <div className="text-xs text-gray-400 mt-1">{aiConfigStore.message}</div>
+                            </div>
+                            <div className="flex bg-gray-100 p-1 rounded-xl">
+                                {['gemini', 'deepseek'].map((provider) => (
+                                    <button key={provider} onClick={() => setAiConfig({ ...aiConfig, provider })} className={`flex-1 py-2 rounded-lg text-sm font-bold capitalize ${aiConfig.provider === provider ? 'bg-white shadow text-primary' : 'text-gray-400'}`}>{provider}</button>
+                                ))}
+                            </div>
+                            <input
+                                className="w-full p-3 border rounded-xl outline-none"
+                                type="password"
+                                value={aiConfig.key}
+                                onChange={(event) => setAiConfig({ ...aiConfig, key: event.target.value })}
+                                placeholder={aiConfig.hasKey ? '留空则保留当前 Key' : '输入当前账号的 API Key'}
+                            />
+                            <div className="text-xs text-gray-400">
+                                {aiConfig.hasKey ? '当前账号已保存密钥，留空保存只会更新 Provider。' : '当前账号尚未配置 AI Key。'}
+                            </div>
+                            <button onClick={saveAiSettings} disabled={savingAi} className="w-full bg-primary text-white py-3 rounded-xl font-bold disabled:opacity-60">
+                                {savingAi ? '保存中...' : '保存 API 设置'}
+                            </button>
+                        </div>
+                    )}
+
+                    {activeTab === 'shortcuts' && (
+                        <div className="bg-white rounded-2xl shadow-ios p-5 space-y-4">
+                            <div>
+                                <div className="font-bold">PC 浏览器快捷键</div>
+                                <div className="text-xs text-gray-400 mt-1">默认：A 上一个，D 下一个，S 显示答案。</div>
+                            </div>
+                            {renderShortcutInput('previous', '上一个', '做题页切到上一题')}
+                            {renderShortcutInput('next', '下一个', '做题页切到下一题')}
+                            {renderShortcutInput('answer', '显示答案', '显示当前题答案')}
+                            <div className="grid grid-cols-2 gap-3">
+                                <button onClick={resetShortcuts} className="py-3 rounded-xl bg-gray-100 text-gray-600 font-bold">恢复默认</button>
+                                <button onClick={saveShortcuts} disabled={savingShortcuts} className="py-3 rounded-xl bg-primary text-white font-bold disabled:opacity-60">保存快捷键</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'export' && (
+                        <div className="bg-white rounded-2xl shadow-ios p-5 space-y-4">
+                            <div>
+                                <div className="font-bold">导出当前目录题库</div>
+                                <div className="text-xs text-gray-400 mt-1">选择题库后导出 JSON、Markdown 或 CSV。</div>
+                            </div>
+                            {loadingBanks ? (
+                                <div className="p-8 text-center text-gray-400">加载题库中...</div>
+                            ) : banks.length ? banks.map((bank) => (
+                                <div key={bank.id} className="rounded-2xl border border-gray-100 p-4 space-y-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <div className="font-bold truncate">{bank.name}</div>
+                                            <div className="text-xs text-gray-400 mt-1">{bank.question_count || 0} 道题 · 更新于 {formatDateTime(bank.updated_at)}</div>
+                                        </div>
+                                        <i className="fas fa-book text-primary"></i>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <button onClick={() => handleExport(bank, 'json')} disabled={Boolean(exportingKey)} className="py-2 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm disabled:opacity-50">{exportingKey === `${bank.id}-json` ? '导出中' : 'JSON'}</button>
+                                        <button onClick={() => handleExport(bank, 'markdown')} disabled={Boolean(exportingKey)} className="py-2 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm disabled:opacity-50">{exportingKey === `${bank.id}-markdown` ? '导出中' : 'MD'}</button>
+                                        <button onClick={() => handleExport(bank, 'csv')} disabled={Boolean(exportingKey)} className="py-2 rounded-xl bg-gray-100 text-gray-700 font-bold text-sm disabled:opacity-50">{exportingKey === `${bank.id}-csv` ? '导出中' : 'CSV'}</button>
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="p-8 text-center text-gray-400">当前目录暂无题库。</div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const App = () => {
     const [user, setUser] = useState(null);
     const [view, setView] = useState('dashboard');
@@ -1539,6 +1846,7 @@ const App = () => {
     const [showTree, setShowTree] = useState(false);
     const [showRecycleBin, setShowRecycleBin] = useState(false);
     const [showAdminPanel, setShowAdminPanel] = useState(false);
+    const [settingsState, setSettingsState] = useState({ show: false, section: 'profile' });
 
     const loadFolderTree = async () => {
         try {
@@ -1578,6 +1886,19 @@ const App = () => {
         }
     };
 
+    const openSettings = (section = 'profile') => {
+        setSettingsState({ show: true, section });
+    };
+
+    const handleLogout = async () => {
+        if (!confirm('退出登录？')) return;
+        try {
+            await api.auth.logout();
+        } catch (error) {}
+        setSettingsState({ show: false, section: 'profile' });
+        setUser(null);
+    };
+
     const activeBookmarkCollectionId = currentBookmarkCollection ? currentBookmarkCollection.id : (currentBank ? currentBank.active_collection_id : '');
     const activeBookmarkCollectionName = currentBookmarkCollection ? currentBookmarkCollection.name : (currentBank ? currentBank.active_collection_name : '');
 
@@ -1599,13 +1920,7 @@ const App = () => {
                         {view === 'dashboard' && <button onClick={() => setShowRecycleBin(true)} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center"><i className="fas fa-trash-can"></i></button>}
                         {view === 'dashboard' && <button onClick={() => setShowTree(true)} className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center"><i className="fas fa-sitemap"></i></button>}
                         {user.isAdmin && <button onClick={() => setShowAdminPanel(true)} className="w-9 h-9 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center"><i className="fas fa-shield-halved"></i></button>}
-                        <button onClick={async () => {
-                            if (!confirm('退出登录？')) return;
-                            try {
-                                await api.auth.logout();
-                            } catch (error) {}
-                            setUser(null);
-                        }} className="w-9 h-9 bg-gray-200 rounded-full text-gray-500 flex items-center justify-center"><i className="fas fa-user"></i></button>
+                        <button onClick={() => openSettings('profile')} className="w-9 h-9 bg-gray-200 rounded-full text-gray-500 flex items-center justify-center" title="个人设置"><i className="fas fa-user-gear"></i></button>
                     </div>
                 </div>
             </div>
@@ -1617,6 +1932,7 @@ const App = () => {
                         currentFolderPath={currentFolderPath}
                         treeData={folderTree}
                         onStructureChange={loadFolderTree}
+                        onOpenSettings={openSettings}
                         onNavigateFolder={(folderId) => setCurrentFolderId(folderId)}
                         onOpenBank={(bank, bookmarkMode, collection) => {
                             setCurrentBank(bank);
@@ -1638,6 +1954,7 @@ const App = () => {
                     isBookmarkMode={isBookmarkMode}
                     collectionId={activeBookmarkCollectionId}
                     collectionName={activeBookmarkCollectionName}
+                    onOpenSettings={openSettings}
                 />}
                 {view === 'bookmarkManager' && currentBank && <BookmarkManager bank={currentBank} />}
             </div>
@@ -1659,6 +1976,15 @@ const App = () => {
             <AdminPanelModal
                 show={showAdminPanel}
                 onClose={() => setShowAdminPanel(false)}
+            />
+
+            <PersonalSettingsModal
+                show={settingsState.show}
+                user={user}
+                currentFolderId={currentFolderId}
+                initialSection={settingsState.section}
+                onClose={() => setSettingsState({ show: false, section: 'profile' })}
+                onLogout={handleLogout}
             />
         </div>
     );

@@ -476,7 +476,24 @@ const buildQuestionFilterQuery = ({ bookmarkedOnly = false, filters = {} }) => {
         params.push(filters.masteryStatus);
     }
 
+    if (filters.viewCount !== undefined && filters.viewCount !== null && filters.viewCount !== '') {
+        const viewCount = Number(filters.viewCount);
+        if (Number.isInteger(viewCount) && viewCount >= 0) {
+            where.push('COALESCE(qp.view_count, 0) = ?');
+            params.push(viewCount);
+        }
+    }
+
     return { where, params };
+};
+
+const buildQuestionOrderClause = (filters = {}) => {
+    if (filters.sortBy === 'viewCount') {
+        const direction = filters.sortOrder === 'asc' ? 'ASC' : 'DESC';
+        return `COALESCE(qp.view_count, 0) ${direction}, q.id ASC`;
+    }
+
+    return 'q.id';
 };
 
 const getQuestionsForBank = async (userId, bankId, bookmarkedOnly = false, filters = {}, collectionId = null) => {
@@ -484,6 +501,7 @@ const getQuestionsForBank = async (userId, bankId, bookmarkedOnly = false, filte
     const collection = await resolveBookmarkCollection(userId, bankId, collectionId);
 
     const { where, params } = buildQuestionFilterQuery({ bookmarkedOnly, filters });
+    const orderClause = buildQuestionOrderClause(filters);
     const sql = `SELECT q.*,
                         CASE WHEN cb.collection_id IS NOT NULL THEN 1 ELSE 0 END AS is_bookmarked,
                         COALESCE(qp.mastery_status, 'unseen') AS mastery_status,
@@ -493,13 +511,42 @@ const getQuestionsForBank = async (userId, bankId, bookmarkedOnly = false, filte
                  LEFT JOIN collection_bookmarks cb ON q.id = cb.question_id AND cb.collection_id = ?
                  LEFT JOIN question_progress qp ON q.id = qp.question_id AND qp.user_id = ?
                  WHERE q.deleted_at IS NULL AND ${where.join(' AND ')}
-                 ORDER BY q.id`;
+                 ORDER BY ${orderClause}`;
 
     const rows = await dbAll(sql, [collection.id, userId, bankId, ...params]);
     const legacyOptionsById = new Map(rows.map((row) => [row.id, parseLegacyOptions(row.options)]));
     const optionMap = await getQuestionOptions(rows.map((row) => row.id), legacyOptionsById);
 
     return rows.map((row) => mapQuestionRow(row, optionMap));
+};
+
+const getQuestionViewCountRange = async (userId, bankId, bookmarkedOnly = false, collectionId = null) => {
+    await getOwnedBank(userId, bankId);
+    const collection = await resolveBookmarkCollection(userId, bankId, collectionId);
+    const where = ['q.deleted_at IS NULL', 'q.bank_id = ?'];
+
+    if (bookmarkedOnly) {
+        where.push('cb.collection_id IS NOT NULL');
+    }
+
+    const row = await dbGet(
+        `SELECT MIN(COALESCE(qp.view_count, 0)) AS min_view_count,
+                MAX(COALESCE(qp.view_count, 0)) AS max_view_count
+         FROM questions q
+         LEFT JOIN collection_bookmarks cb ON q.id = cb.question_id AND cb.collection_id = ?
+         LEFT JOIN question_progress qp ON q.id = qp.question_id AND qp.user_id = ?
+         WHERE ${where.join(' AND ')}`,
+        [collection.id, userId, bankId],
+    );
+
+    if (row.min_view_count === null || row.max_view_count === null) {
+        return { min: null, max: null };
+    }
+
+    return {
+        min: row.min_view_count || 0,
+        max: row.max_view_count || 0,
+    };
 };
 
 const ensureFolderOwnership = async (userId, folderId) => {
@@ -1350,6 +1397,20 @@ app.get('/api/banks/:id/stats', authenticateToken, async (req, res) => {
         res.json(stats);
     } catch (error) {
         return sendError(res, error.message || '获取题库统计失败', error.status || 500);
+    }
+});
+
+app.get('/api/banks/:id/view-count-range', authenticateToken, async (req, res) => {
+    try {
+        const range = await getQuestionViewCountRange(
+            req.user.id,
+            Number(req.params.id),
+            req.query.bookmarkedOnly === 'true',
+            req.query.collectionId || null,
+        );
+        res.json(range);
+    } catch (error) {
+        return sendError(res, error.message || '获取查看次数范围失败', error.status || 500);
     }
 });
 

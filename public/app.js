@@ -879,8 +879,12 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
         type: '',
         hasAnalysis: '',
         masteryStatus: '',
+        viewCount: '',
+        sortBy: '',
+        sortOrder: '',
         random: false,
     });
+    const [viewCountRange, setViewCountRange] = useState({ min: null, max: null });
     const [queryInput, setQueryInput] = useState('');
     const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
     const [shortcuts, setShortcuts] = useState(() => shortcutsStore.read());
@@ -906,6 +910,9 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
                 type: activeFilters.type,
                 hasAnalysis: activeFilters.hasAnalysis,
                 masteryStatus: activeFilters.masteryStatus,
+                viewCount: activeFilters.viewCount,
+                sortBy: activeFilters.sortBy,
+                sortOrder: activeFilters.sortOrder,
                 collectionId,
             };
             const response = isBookmarkMode
@@ -922,7 +929,23 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
         setLoading(false);
     };
 
+    const loadViewCountRange = async () => {
+        try {
+            const range = await api.banks.viewCountRange(bank.id, {
+                bookmarkedOnly: isBookmarkMode ? 'true' : '',
+                collectionId,
+            });
+            setViewCountRange({
+                min: range.min === null || range.min === undefined ? null : Number(range.min),
+                max: range.max === null || range.max === undefined ? null : Number(range.max),
+            });
+        } catch (error) {
+            setViewCountRange({ min: null, max: null });
+        }
+    };
+
     useEffect(() => {
+        loadViewCountRange();
         loadQuestions(filters);
     }, [bank.id, isBookmarkMode, collectionId]);
 
@@ -1007,13 +1030,35 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
     };
 
     const handleRandomToggle = async () => {
-        const nextFilters = { ...filters, random: !filters.random };
+        const nextFilters = filters.random
+            ? { ...filters, random: false }
+            : { ...filters, random: true, sortBy: '', sortOrder: '' };
         setFilters(nextFilters);
         await loadQuestions(nextFilters);
     };
 
     const handleQuickFilter = async (key, value) => {
         const nextFilters = { ...filters, [key]: filters[key] === value ? '' : value };
+        setFilters(nextFilters);
+        await loadQuestions(nextFilters);
+    };
+
+    const handleViewCountSort = async () => {
+        const nextSortOrder = filters.sortBy !== 'viewCount'
+            ? 'desc'
+            : (filters.sortOrder === 'desc' ? 'asc' : '');
+        const nextFilters = {
+            ...filters,
+            sortBy: nextSortOrder ? 'viewCount' : '',
+            sortOrder: nextSortOrder,
+            random: false,
+        };
+        setFilters(nextFilters);
+        await loadQuestions(nextFilters);
+    };
+
+    const handleViewCountFilter = async (value) => {
+        const nextFilters = { ...filters, viewCount: value };
         setFilters(nextFilters);
         await loadQuestions(nextFilters);
     };
@@ -1092,6 +1137,12 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
         mastered: '已掌握',
         review: '待复习',
     };
+    const viewCountOptions = viewCountRange.min === null || viewCountRange.max === null
+        ? []
+        : Array.from(
+            { length: Math.max(0, viewCountRange.max - viewCountRange.min + 1) },
+            (_, optionIndex) => viewCountRange.min + optionIndex,
+        );
 
     return (
         <div className="flex flex-col h-full relative gap-4">
@@ -1110,6 +1161,20 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
                     <button onClick={() => handleQuickFilter('hasAnalysis', 'true')} className={`px-3 py-2 rounded-full text-sm ${filters.hasAnalysis === 'true' ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-600'}`}>已解析</button>
                     <button onClick={() => handleQuickFilter('masteryStatus', 'mastered')} className={`px-3 py-2 rounded-full text-sm ${filters.masteryStatus === 'mastered' ? 'bg-green-500 text-white' : 'bg-gray-100 text-gray-600'}`}>已掌握</button>
                     <button onClick={() => handleQuickFilter('masteryStatus', 'review')} className={`px-3 py-2 rounded-full text-sm ${filters.masteryStatus === 'review' ? 'bg-yellow-500 text-white' : 'bg-gray-100 text-gray-600'}`}>待复习</button>
+                    <button onClick={handleViewCountSort} className={`px-3 py-2 rounded-full text-sm ${filters.sortBy === 'viewCount' ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600'}`}>
+                        查看次数{filters.sortBy === 'viewCount' ? (filters.sortOrder === 'asc' ? ' ↑' : ' ↓') : ''}
+                    </button>
+                    <select
+                        value={filters.viewCount}
+                        onChange={(event) => handleViewCountFilter(event.target.value)}
+                        disabled={viewCountOptions.length === 0}
+                        className={`px-3 py-2 rounded-full text-sm outline-none ${filters.viewCount !== '' ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600'} disabled:opacity-50`}
+                    >
+                        <option value="">全部次数</option>
+                        {viewCountOptions.map((count) => (
+                            <option key={count} value={String(count)}>{count} 次</option>
+                        ))}
+                    </select>
                 </div>
                 <div className="flex justify-between items-center text-xs text-gray-400">
                     <div>当前共 {questions.length} 题</div>

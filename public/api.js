@@ -85,6 +85,7 @@ window.api = {
         rename: (id, name) => apiRequest(`/banks/${id}`, 'PATCH', { name }),
         move: (id, folderId) => apiRequest(`/banks/${id}/move`, 'PATCH', { folderId }),
         stats: (id) => apiRequest(`/banks/${id}/stats`),
+        viewCountRange: (id, params = {}) => apiRequest(`/banks/${id}/view-count-range${toQueryString(params)}`),
         remove: (id) => apiRequest(`/banks/${id}`, 'DELETE'),
         exportUrl: (id, format = 'json', scope = '', collectionId = '') => `/api/banks/${id}/export${toQueryString({ format, scope, collectionId })}`,
         downloadExport: (id, format = 'json', filenameHint = '', scope = '', collectionId = '') => downloadWithAuth(`/banks/${id}/export${toQueryString({ format, scope, collectionId })}`, filenameHint),

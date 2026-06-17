@@ -42,6 +42,88 @@ const shuffleArray = (items) => {
     return nextItems;
 };
 
+const OPTION_SHUFFLE_STORAGE_KEY = 'examApp.shuffleOptions';
+const optionKeyFromIndex = (index) => String.fromCharCode(65 + index);
+
+const parseChoiceAnswerKeys = (answer = '') => {
+    const normalized = String(answer || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[，、/\s]+/g, ',')
+        .replace(/\.+/g, ',')
+        .replace(/,+/g, ',')
+        .replace(/^,|,$/g, '');
+
+    if (!normalized) return [];
+    if (/^[A-Z]{2,}$/.test(normalized)) return normalized.split('');
+    if (/^[A-Z](?:,[A-Z])*$/.test(normalized)) return normalized.split(',');
+    return [];
+};
+
+const buildShuffledQuestionDisplay = (question, shouldShuffleOptions) => {
+    const baseQuestion = { ...question };
+    delete baseQuestion.display_options;
+    delete baseQuestion.display_answer;
+    delete baseQuestion.options_shuffled;
+
+    if (!shouldShuffleOptions) {
+        return {
+            ...baseQuestion,
+            display_options: baseQuestion.options || [],
+            display_answer: baseQuestion.answer || '',
+            options_shuffled: false,
+        };
+    }
+
+    const options = Array.isArray(baseQuestion.options) ? baseQuestion.options : [];
+    const answerKeys = parseChoiceAnswerKeys(baseQuestion.answer);
+    if (options.length < 2 || answerKeys.length === 0 || options.length > 26) {
+        return {
+            ...baseQuestion,
+            display_options: options,
+            display_answer: baseQuestion.answer || '',
+            options_shuffled: false,
+        };
+    }
+
+    const optionKeys = new Set(options.map((option) => String(option.key || '').toUpperCase()));
+    const hasValidAnswer = answerKeys.every((key) => optionKeys.has(key));
+    if (!hasValidAnswer) {
+        return {
+            ...baseQuestion,
+            display_options: options,
+            display_answer: baseQuestion.answer || '',
+            options_shuffled: false,
+        };
+    }
+
+    const shuffledOptions = shuffleArray(options);
+    const keyMap = new Map();
+    const displayOptions = shuffledOptions.map((option, index) => {
+        const nextKey = optionKeyFromIndex(index);
+        keyMap.set(String(option.key || '').toUpperCase(), nextKey);
+        return {
+            ...option,
+            key: nextKey,
+        };
+    });
+    const displayAnswer = answerKeys
+        .map((key) => keyMap.get(key))
+        .sort()
+        .join(',');
+
+    return {
+        ...baseQuestion,
+        display_options: displayOptions,
+        display_answer: displayAnswer,
+        options_shuffled: true,
+    };
+};
+
+const buildQuestionDisplays = (questions, shouldShuffleOptions) => (
+    questions.map((question) => buildShuffledQuestionDisplay(question, shouldShuffleOptions))
+);
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const hasItems = (items) => Array.isArray(items) && items.length > 0;
 const valueOrEmpty = (value) => (value === undefined || value === null ? '' : value);
@@ -888,6 +970,7 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
     const [queryInput, setQueryInput] = useState('');
     const [aiConfig, setAiConfig] = useState(() => aiConfigStore.read());
     const [shortcuts, setShortcuts] = useState(() => shortcutsStore.read());
+    const [shuffleOptions, setShuffleOptions] = useState(() => localStorage.getItem(OPTION_SHUFFLE_STORAGE_KEY) === 'true');
     const lastViewRef = useRef(null);
 
     const loadAiConfig = async () => {
@@ -918,7 +1001,8 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
             const response = isBookmarkMode
                 ? await api.banks.bookmarks(bank.id, params)
                 : await api.banks.questions(bank.id, params);
-            const data = activeFilters.random ? shuffleArray(response) : response;
+            const orderedQuestions = activeFilters.random ? shuffleArray(response) : response;
+            const data = buildQuestionDisplays(orderedQuestions, shuffleOptions);
             setQuestions(data);
             setIndex(0);
             setShowAns(false);
@@ -1037,6 +1121,13 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
         await loadQuestions(nextFilters);
     };
 
+    const handleShuffleOptionsToggle = () => {
+        const nextValue = !shuffleOptions;
+        setShuffleOptions(nextValue);
+        localStorage.setItem(OPTION_SHUFFLE_STORAGE_KEY, nextValue ? 'true' : 'false');
+        setQuestions((prev) => buildQuestionDisplays(prev, nextValue));
+    };
+
     const handleQuickFilter = async (key, value) => {
         const nextFilters = { ...filters, [key]: filters[key] === value ? '' : value };
         setFilters(nextFilters);
@@ -1143,15 +1234,18 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
             { length: Math.max(0, viewCountRange.max - viewCountRange.min + 1) },
             (_, optionIndex) => viewCountRange.min + optionIndex,
         );
+    const currentOptions = currentQ.display_options || currentQ.options || [];
+    const currentAnswer = currentQ.display_answer || currentQ.answer || '';
 
     return (
         <div className="flex flex-col h-full relative gap-4">
             <div className="bg-white rounded-3xl shadow-ios p-5 space-y-4">
                 <div className="flex flex-col md:flex-row gap-3">
                     <input className="flex-1 p-3 bg-gray-50 rounded-xl outline-none" placeholder="搜索题干、答案、来源" value={queryInput} onChange={(e)=>setQueryInput(e.target.value)} />
-                    <div className="flex gap-2">
-                        <button onClick={applyFilters} className="px-5 rounded-xl bg-primary text-white font-bold">搜索</button>
-                        <button onClick={handleRandomToggle} className={`px-5 rounded-xl font-bold ${filters.random ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-600'}`}>随机</button>
+                    <div className="flex flex-wrap gap-2">
+                        <button onClick={applyFilters} className="px-5 rounded-xl bg-primary text-white font-bold whitespace-nowrap">搜索</button>
+                        <button onClick={handleRandomToggle} className={`px-5 rounded-xl font-bold whitespace-nowrap ${filters.random ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-600'}`}>随机</button>
+                        <button onClick={handleShuffleOptionsToggle} className={`px-5 rounded-xl font-bold whitespace-nowrap ${shuffleOptions ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-600'}`}>选项打乱</button>
                     </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1200,9 +1294,9 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
                     </div>
 
                     <div className="text-lg font-medium leading-relaxed text-gray-800 whitespace-pre-wrap flex-1">{currentQ.stem || currentQ.content}</div>
-                    {hasItems(currentQ.options) && (
+                    {hasItems(currentOptions) && (
                         <div className="mt-6 space-y-3">
-                            {currentQ.options.map((option) => (
+                            {currentOptions.map((option) => (
                                 <div key={option.key} className="rounded-2xl bg-gray-50 p-4 text-sm">
                                     <span className="font-bold mr-2">{option.key}.</span>{option.text}
                                 </div>
@@ -1212,7 +1306,7 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
 
                     {showAns && (
                         <div className="mt-8 pt-6 border-t border-gray-100 animate-slide-up">
-                            <div className="font-bold text-success mb-2"><i className="fas fa-check-circle mr-2"></i>答案：{currentQ.answer || '未提供'}</div>
+                            <div className="font-bold text-success mb-2"><i className="fas fa-check-circle mr-2"></i>答案：{currentAnswer || '未提供'}</div>
                             <div className="flex flex-wrap gap-2 mb-4">
                                 <button onClick={() => updateMasteryStatus('learning')} className={`px-3 py-2 rounded-full text-sm ${currentQ.mastery_status === 'learning' ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-600'}`}>学习中</button>
                                 <button onClick={() => updateMasteryStatus('mastered')} className={`px-3 py-2 rounded-full text-sm ${currentQ.mastery_status === 'mastered' ? 'bg-green-500 text-white' : 'bg-green-50 text-green-600'}`}>已掌握</button>

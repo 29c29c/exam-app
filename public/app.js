@@ -138,6 +138,7 @@ const DEFAULT_SHORTCUTS = {
     previous: 'a',
     next: 'd',
     answer: 's',
+    bookmark: 'v',
 };
 
 const normalizeShortcutKey = (value) => {
@@ -153,6 +154,7 @@ const shortcutsStore = {
                 previous: normalizeShortcutKey(parsed.previous) || DEFAULT_SHORTCUTS.previous,
                 next: normalizeShortcutKey(parsed.next) || DEFAULT_SHORTCUTS.next,
                 answer: normalizeShortcutKey(parsed.answer) || DEFAULT_SHORTCUTS.answer,
+                bookmark: normalizeShortcutKey(parsed.bookmark) || DEFAULT_SHORTCUTS.bookmark,
             };
         } catch (error) {
             return { ...DEFAULT_SHORTCUTS };
@@ -163,6 +165,7 @@ const shortcutsStore = {
             previous: normalizeShortcutKey(shortcuts.previous) || DEFAULT_SHORTCUTS.previous,
             next: normalizeShortcutKey(shortcuts.next) || DEFAULT_SHORTCUTS.next,
             answer: normalizeShortcutKey(shortcuts.answer) || DEFAULT_SHORTCUTS.answer,
+            bookmark: normalizeShortcutKey(shortcuts.bookmark) || DEFAULT_SHORTCUTS.bookmark,
         };
         localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(nextShortcuts));
         return nextShortcuts;
@@ -1100,12 +1103,15 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
             } else if (key === shortcuts.answer) {
                 event.preventDefault();
                 setShowAns(true);
+            } else if (key === shortcuts.bookmark) {
+                event.preventDefault();
+                toggleFav();
             }
         };
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [loading, questions.length, index, showSheet, shortcuts.previous, shortcuts.next, shortcuts.answer]);
+    }, [loading, questions.length, index, showSheet, shortcuts.previous, shortcuts.next, shortcuts.answer, shortcuts.bookmark]);
 
     const applyFilters = async () => {
         const nextFilters = { ...filters, keyword: queryInput.trim() };
@@ -1814,7 +1820,13 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
     };
 
     const saveShortcuts = () => {
-        const values = [shortcutsDraft.previous, shortcutsDraft.next, shortcutsDraft.answer].map(normalizeShortcutKey);
+        const nextDraft = {
+            previous: normalizeShortcutKey(shortcutsDraft.previous),
+            next: normalizeShortcutKey(shortcutsDraft.next),
+            answer: normalizeShortcutKey(shortcutsDraft.answer),
+            bookmark: normalizeShortcutKey(shortcutsDraft.bookmark),
+        };
+        const values = Object.values(nextDraft);
         if (values.some((value) => !value)) {
             alert('请为每个快捷键填写一个按键');
             return;
@@ -1825,11 +1837,7 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
         }
 
         setSavingShortcuts(true);
-        const nextShortcuts = shortcutsStore.save({
-            previous: values[0],
-            next: values[1],
-            answer: values[2],
-        });
+        const nextShortcuts = shortcutsStore.save(nextDraft);
         setShortcutsDraft(nextShortcuts);
         window.dispatchEvent(new CustomEvent('quiz-shortcuts-updated', { detail: nextShortcuts }));
         setSavingShortcuts(false);
@@ -1947,11 +1955,12 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
                         <div className="bg-white rounded-2xl shadow-ios p-5 space-y-4">
                             <div>
                                 <div className="font-bold">PC 浏览器快捷键</div>
-                                <div className="text-xs text-gray-400 mt-1">默认：A 上一个，D 下一个，S 显示答案。</div>
+                                <div className="text-xs text-gray-400 mt-1">默认：A 上一个，D 下一个，S 显示答案，V 收藏。</div>
                             </div>
                             {renderShortcutInput('previous', '上一个', '做题页切到上一题')}
                             {renderShortcutInput('next', '下一个', '做题页切到下一题')}
                             {renderShortcutInput('answer', '显示答案', '显示当前题答案')}
+                            {renderShortcutInput('bookmark', '收藏', '收藏或取消收藏当前题')}
                             <div className="grid grid-cols-2 gap-3">
                                 <button onClick={resetShortcuts} className="py-3 rounded-xl bg-gray-100 text-gray-600 font-bold">恢复默认</button>
                                 <button onClick={saveShortcuts} disabled={savingShortcuts} className="py-3 rounded-xl bg-primary text-white font-bold disabled:opacity-60">保存快捷键</button>

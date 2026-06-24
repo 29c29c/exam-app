@@ -91,6 +91,8 @@ window.api = {
         downloadExport: (id, format = 'json', filenameHint = '', scope = '', collectionId = '') => downloadWithAuth(`/banks/${id}/export${toQueryString({ format, scope, collectionId })}`, filenameHint),
         questions: (id, params = {}) => apiRequest(`/banks/${id}/questions${toQueryString(params)}`),
         bookmarks: (id, params = {}) => apiRequest(`/banks/${id}/bookmarks${toQueryString(params)}`),
+        getPosition: (id, params = {}) => apiRequest(`/banks/${id}/position${toQueryString(params)}`),
+        savePosition: (id, payload) => apiRequest(`/banks/${id}/position`, 'POST', payload),
         bookmarkCollections: (id) => apiRequest(`/banks/${id}/bookmark-collections`),
         createBookmarkCollection: (id, payload) => apiRequest(`/banks/${id}/bookmark-collections`, 'POST', payload),
         setActiveBookmarkCollection: (id, collectionId) => apiRequest(`/banks/${id}/bookmark-collections/active`, 'POST', { collectionId }),

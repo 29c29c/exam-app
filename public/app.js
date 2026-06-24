@@ -124,6 +124,18 @@ const buildQuestionDisplays = (questions, shouldShuffleOptions) => (
     questions.map((question) => buildShuffledQuestionDisplay(question, shouldShuffleOptions))
 );
 
+const resolveSavedQuestionIndex = (questions, position) => {
+    if (!Array.isArray(questions) || questions.length === 0) return 0;
+    if (position && position.questionId) {
+        const matchedIndex = questions.findIndex((question) => Number(question.id) === Number(position.questionId));
+        if (matchedIndex >= 0) return matchedIndex;
+    }
+
+    const savedIndex = position ? Number(position.questionIndex) : 0;
+    if (!Number.isFinite(savedIndex)) return 0;
+    return Math.max(0, Math.min(questions.length - 1, savedIndex));
+};
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const hasItems = (items) => Array.isArray(items) && items.length > 0;
 const valueOrEmpty = (value) => (value === undefined || value === null ? '' : value);
@@ -987,6 +999,7 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
     const [shortcuts, setShortcuts] = useState(() => shortcutsStore.read());
     const [shuffleOptions, setShuffleOptions] = useState(() => localStorage.getItem(OPTION_SHUFFLE_STORAGE_KEY) === 'true');
     const lastViewRef = useRef(null);
+    const lastSavedPositionRef = useRef('');
 
     const loadAiConfig = async () => {
         try {
@@ -1000,9 +1013,10 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
         } catch (error) {}
     };
 
-    const loadQuestions = async (activeFilters) => {
+    const loadQuestions = async (activeFilters, shouldRestorePosition = false) => {
         setLoading(true);
         try {
+            const mode = isBookmarkMode ? 'bookmarks' : 'bank';
             const params = {
                 keyword: activeFilters.keyword,
                 type: activeFilters.type,
@@ -1013,13 +1027,19 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
                 sortOrder: activeFilters.sortOrder,
                 collectionId,
             };
-            const response = isBookmarkMode
-                ? await api.banks.bookmarks(bank.id, params)
-                : await api.banks.questions(bank.id, params);
+            const [response, position] = await Promise.all([
+                isBookmarkMode
+                    ? api.banks.bookmarks(bank.id, params)
+                    : api.banks.questions(bank.id, params),
+                shouldRestorePosition
+                    ? api.banks.getPosition(bank.id, { mode, collectionId }).catch(() => null)
+                    : Promise.resolve(null),
+            ]);
             const orderedQuestions = activeFilters.random ? shuffleArray(response) : response;
             const data = buildQuestionDisplays(orderedQuestions, shuffleOptions);
+            const nextIndex = shouldRestorePosition ? resolveSavedQuestionIndex(data, position) : 0;
             setQuestions(data);
-            setIndex(0);
+            setIndex(nextIndex);
             setShowAns(false);
             lastViewRef.current = null;
         } catch (error) {
@@ -1045,7 +1065,7 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
 
     useEffect(() => {
         loadViewCountRange();
-        loadQuestions(filters);
+        loadQuestions(filters, true);
     }, [bank.id, isBookmarkMode, collectionId]);
 
     useEffect(() => {
@@ -1053,6 +1073,20 @@ const Quiz = ({ bank, isBookmarkMode, collectionId, collectionName, onOpenSettin
     }, []);
 
     const currentQ = questions[index];
+
+    useEffect(() => {
+        if (loading || !currentQ) return;
+        const mode = isBookmarkMode ? 'bookmarks' : 'bank';
+        const saveKey = [bank.id, mode, collectionId || '', currentQ.id, index].join(':');
+        if (lastSavedPositionRef.current === saveKey) return;
+        lastSavedPositionRef.current = saveKey;
+        api.banks.savePosition(bank.id, {
+            mode,
+            collectionId,
+            questionId: currentQ.id,
+            questionIndex: index,
+        }).catch(() => {});
+    }, [loading, bank.id, isBookmarkMode, collectionId, currentQ ? currentQ.id : null, index]);
 
     const goPrevious = () => {
         if (index === 0) return;

@@ -422,6 +422,24 @@ const resolveBookmarkCollection = async (userId, bankId, collectionId = null) =>
     return collection;
 };
 
+const resolveQuizPositionScope = async (userId, bankId, mode = 'bank', collectionId = null) => {
+    await getOwnedBank(userId, bankId);
+    if (mode === 'bookmarks') {
+        const collection = await resolveBookmarkCollection(userId, bankId, collectionId);
+        return {
+            mode: 'bookmarks',
+            collectionId: collection.id,
+            scopeKey: `bookmarks:${collection.id}`,
+        };
+    }
+
+    return {
+        mode: 'bank',
+        collectionId: null,
+        scopeKey: `bank:${bankId}`,
+    };
+};
+
 const listBookmarkCollections = async (userId, bankId) => {
     const active = await getActiveBookmarkCollection(userId, bankId);
     const rows = await dbAll(
@@ -892,12 +910,28 @@ const initDatabase = async () => {
             PRIMARY KEY (user_id, question_id)
         );
 
+        CREATE TABLE IF NOT EXISTS quiz_positions (
+            user_id INTEGER NOT NULL,
+            scope_key TEXT NOT NULL,
+            bank_id INTEGER NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'bank',
+            collection_id INTEGER,
+            question_id INTEGER,
+            question_index INTEGER DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, scope_key),
+            FOREIGN KEY (bank_id) REFERENCES banks(id) ON DELETE CASCADE,
+            FOREIGN KEY (collection_id) REFERENCES bookmark_collections(id) ON DELETE CASCADE,
+            FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE SET NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_folders_user_parent ON folders(user_id, parent_id);
         CREATE INDEX IF NOT EXISTS idx_banks_user_folder ON banks(user_id, folder_id);
         CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id);
         CREATE INDEX IF NOT EXISTS idx_question_options_question ON question_options(question_id);
         CREATE INDEX IF NOT EXISTS idx_import_batches_user ON import_batches(user_id);
         CREATE INDEX IF NOT EXISTS idx_question_progress_user ON question_progress(user_id);
+        CREATE INDEX IF NOT EXISTS idx_quiz_positions_bank ON quiz_positions(user_id, bank_id);
         CREATE INDEX IF NOT EXISTS idx_bookmark_collections_bank ON bookmark_collections(user_id, bank_id);
         CREATE INDEX IF NOT EXISTS idx_collection_bookmarks_question ON collection_bookmarks(question_id);
     `);
@@ -1885,6 +1919,88 @@ app.get('/api/banks/:id/questions', authenticateToken, async (req, res) => {
         res.json(rows);
     } catch (error) {
         return sendError(res, error.message || '获取题目失败', error.status || 500);
+    }
+});
+
+app.get('/api/banks/:id/position', authenticateToken, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        const scope = await resolveQuizPositionScope(
+            req.user.id,
+            bankId,
+            req.query.mode === 'bookmarks' ? 'bookmarks' : 'bank',
+            req.query.collectionId || null,
+        );
+        const position = await dbGet(
+            `SELECT q.id AS question_id, qp.question_index, qp.updated_at
+             FROM quiz_positions qp
+             LEFT JOIN questions q ON q.id = qp.question_id AND q.deleted_at IS NULL
+             WHERE qp.user_id = ? AND qp.scope_key = ?`,
+            [req.user.id, scope.scopeKey],
+        );
+
+        res.json(position ? {
+            mode: scope.mode,
+            collectionId: scope.collectionId,
+            questionId: position.question_id || null,
+            questionIndex: position.question_index || 0,
+            updatedAt: position.updated_at || null,
+        } : {
+            mode: scope.mode,
+            collectionId: scope.collectionId,
+            questionId: null,
+            questionIndex: 0,
+            updatedAt: null,
+        });
+    } catch (error) {
+        return sendError(res, error.message || '获取上次位置失败', error.status || 500);
+    }
+});
+
+app.post('/api/banks/:id/position', authenticateToken, async (req, res) => {
+    try {
+        const bankId = Number(req.params.id);
+        const questionId = Number(req.body.questionId);
+        const questionIndex = Math.max(0, Number(req.body.questionIndex) || 0);
+        if (!questionId) return sendError(res, '题目不能为空');
+
+        const scope = await resolveQuizPositionScope(
+            req.user.id,
+            bankId,
+            req.body.mode === 'bookmarks' ? 'bookmarks' : 'bank',
+            req.body.collectionId || null,
+        );
+        const question = await dbGet(
+            `SELECT q.id
+             FROM questions q
+             JOIN banks b ON b.id = q.bank_id
+             WHERE q.id = ? AND q.bank_id = ? AND q.deleted_at IS NULL AND b.user_id = ? AND b.deleted_at IS NULL`,
+            [questionId, bankId, req.user.id],
+        );
+        if (!question) return sendError(res, '题目不存在', 404);
+
+        await dbRun(
+            `INSERT INTO quiz_positions (user_id, scope_key, bank_id, mode, collection_id, question_id, question_index, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id, scope_key) DO UPDATE SET
+                bank_id = excluded.bank_id,
+                mode = excluded.mode,
+                collection_id = excluded.collection_id,
+                question_id = excluded.question_id,
+                question_index = excluded.question_index,
+                updated_at = CURRENT_TIMESTAMP`,
+            [req.user.id, scope.scopeKey, bankId, scope.mode, scope.collectionId, questionId, questionIndex],
+        );
+
+        res.json({
+            success: true,
+            mode: scope.mode,
+            collectionId: scope.collectionId,
+            questionId,
+            questionIndex,
+        });
+    } catch (error) {
+        return sendError(res, error.message || '保存上次位置失败', error.status || 500);
     }
 });
 

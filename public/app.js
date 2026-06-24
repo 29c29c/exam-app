@@ -134,27 +134,38 @@ const writeClipboard = (text) => {
 };
 
 const SHORTCUT_STORAGE_KEY = 'examApp.quizShortcuts';
+const SHORTCUT_STORAGE_VERSION = 2;
 const DEFAULT_SHORTCUTS = {
     previous: 'a',
     next: 'd',
     answer: 's',
-    bookmark: 'v',
+    bookmark: ' ',
 };
 
 const normalizeShortcutKey = (value) => {
-    const chars = Array.from(String(value || '').trim());
-    return chars.length ? chars[0].toLowerCase() : '';
+    const rawValue = String(value || '');
+    if (rawValue === ' ' || rawValue === 'Space' || rawValue === 'Spacebar') return ' ';
+
+    const chars = Array.from(rawValue.trim());
+    return chars.length === 1 ? chars[0].toLowerCase() : '';
+};
+
+const formatShortcutKey = (value) => {
+    const key = normalizeShortcutKey(value);
+    if (key === ' ') return '空格';
+    return key ? key.toUpperCase() : '';
 };
 
 const shortcutsStore = {
     read: () => {
         try {
             const parsed = JSON.parse(localStorage.getItem(SHORTCUT_STORAGE_KEY) || '{}');
+            const bookmark = parsed._version ? parsed.bookmark : (parsed.bookmark === 'v' ? DEFAULT_SHORTCUTS.bookmark : parsed.bookmark);
             return {
                 previous: normalizeShortcutKey(parsed.previous) || DEFAULT_SHORTCUTS.previous,
                 next: normalizeShortcutKey(parsed.next) || DEFAULT_SHORTCUTS.next,
                 answer: normalizeShortcutKey(parsed.answer) || DEFAULT_SHORTCUTS.answer,
-                bookmark: normalizeShortcutKey(parsed.bookmark) || DEFAULT_SHORTCUTS.bookmark,
+                bookmark: normalizeShortcutKey(bookmark) || DEFAULT_SHORTCUTS.bookmark,
             };
         } catch (error) {
             return { ...DEFAULT_SHORTCUTS };
@@ -166,6 +177,7 @@ const shortcutsStore = {
             next: normalizeShortcutKey(shortcuts.next) || DEFAULT_SHORTCUTS.next,
             answer: normalizeShortcutKey(shortcuts.answer) || DEFAULT_SHORTCUTS.answer,
             bookmark: normalizeShortcutKey(shortcuts.bookmark) || DEFAULT_SHORTCUTS.bookmark,
+            _version: SHORTCUT_STORAGE_VERSION,
         };
         localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(nextShortcuts));
         return nextShortcuts;
@@ -1819,6 +1831,15 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
         }));
     };
 
+    const captureShortcut = (event, name) => {
+        event.preventDefault();
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+            updateShortcut(name, '');
+            return;
+        }
+        updateShortcut(name, event.key);
+    };
+
     const saveShortcuts = () => {
         const nextDraft = {
             previous: normalizeShortcutKey(shortcutsDraft.previous),
@@ -1878,10 +1899,12 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
                 <span className="block text-xs text-gray-400 mt-1">{hint}</span>
             </span>
             <input
-                className="h-12 rounded-xl border border-gray-200 bg-white text-center text-xl font-bold uppercase outline-none focus:ring-2 focus:ring-primary/30"
-                maxLength={1}
-                value={(shortcutsDraft[name] || '').toUpperCase()}
-                onChange={(event) => updateShortcut(name, event.target.value)}
+                className="h-12 rounded-xl border border-gray-200 bg-white text-center text-lg font-bold outline-none focus:ring-2 focus:ring-primary/30"
+                readOnly
+                value={formatShortcutKey(shortcutsDraft[name])}
+                placeholder="按键"
+                onKeyDown={(event) => captureShortcut(event, name)}
+                onPaste={(event) => event.preventDefault()}
             />
         </label>
     );
@@ -1955,7 +1978,7 @@ const PersonalSettingsModal = ({ show, user, currentFolderId, initialSection, on
                         <div className="bg-white rounded-2xl shadow-ios p-5 space-y-4">
                             <div>
                                 <div className="font-bold">PC 浏览器快捷键</div>
-                                <div className="text-xs text-gray-400 mt-1">默认：A 上一个，D 下一个，S 显示答案，V 收藏。</div>
+                                <div className="text-xs text-gray-400 mt-1">默认：A 上一个，D 下一个，S 显示答案，空格收藏。</div>
                             </div>
                             {renderShortcutInput('previous', '上一个', '做题页切到上一题')}
                             {renderShortcutInput('next', '下一个', '做题页切到下一题')}
